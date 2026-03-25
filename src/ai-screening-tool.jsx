@@ -7,8 +7,8 @@ const API_BASE = "https://ai-screener-api.qkrcksgud91.workers.dev";
 const API_URL = "https://ai-screener-api.qkrcksgud91.workers.dev";
 
 // 요구사항 3: 모델 분리 — 기준 생성은 Sonnet, 스크리닝은 Haiku
-const MODEL_SMART = "claude-sonnet-4-20250514";
-const MODEL_FAST = "claude-3-5-haiku-latest";
+const MODEL_SMART = "claude-sonnet-4-6";
+const MODEL_FAST = "claude-haiku-4-5-20251001";
 
 /* ═══════════════════════════════════════════════════════════
    SYSTEM PROMPTS (요구사항 1: 점수제 폐지, 충족/미충족 기반)
