@@ -613,7 +613,7 @@ export default function AIScreeningTool() {
         </div>
       </div>
 
-      <div style={{ padding: "24px 32px", maxWidth: 800, margin: "0 auto" }}>
+      <div style={{ padding: "24px 32px", maxWidth: 1200, margin: "0 auto" }}>
 
         {/* Loading */}
         {loading && (
