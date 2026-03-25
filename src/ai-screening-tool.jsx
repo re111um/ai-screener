@@ -588,7 +588,6 @@ export default function AIScreeningTool() {
       fontFamily: "'IBM Plex Sans', 'Pretendard', -apple-system, sans-serif",
       background: "var(--bg)", color: "var(--text)", minHeight: "100vh", padding: 0, margin: 0,
     }}>
-      <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
       {/* Header */}
