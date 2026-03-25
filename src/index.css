@@ -64,19 +64,16 @@ html, body {
 }
 
 /* ====================================================
-   🔧 4. 전체 레이아웃 (중앙 정렬)
+   🔧 4. 전체 레이아웃 (화면 꽉 채우기)
    ==================================================== */
 #root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
+  width: 100%; /* 1126px로 고정되어 있던 걸 100%로 시원하게 풉니다! */
   min-height: 100vh;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  background-color: #ffffff; /* 컨텐츠 영역은 흰색으로 강조 */
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); /* 살짝 그림자를 주어 입체감 부여 */
+  background-color: var(--bg); /* 전체 배경색과 똑같이 맞춰서 공백을 없앱니다 */
 }
 
 /* ====================================================
