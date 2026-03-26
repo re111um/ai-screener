@@ -1,14 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 const API_URL = "https://ai-screener-api.qkrcksgud91.workers.dev";
-const MODEL_SMART = "claude-sonnet-4-6";    // 옵션 B          // 옵션 A
+const MODEL_SMART = "claude-sonnet-4-6";
 const MODEL_FAST = "claude-haiku-4-5-20251001";
-
-// ─────────────────────────────────────────────
-// [추가] localStorage에서 사용할 키 상수
-// ─────────────────────────────────────────────
-const LS_KEY_JD = "saved_jd";
-const LS_KEY_CRITERIA = "saved_criteria";
 
 const SYS_CRITERIA = `당신은 세계 최고의 HR 전문가이자 직무 분석가입니다. 
 채용 공고(JD)를 분석하여 서류 스크리닝에 사용할 핵심 평가 기준 3~5가지를 생성하십시오.
@@ -52,6 +46,8 @@ const SYS_URL_FETCH = `당신은 채용 공고 추출 전문가입니다. 웹 �
 포지션명, 주요 업무, 자격 요건, 우대 사항, 근무 조건 등을 포함해 정리하세요.
 마크다운이나 JSON이 아닌 일반 텍스트로 작성하세요.`;
 
+// ─── 유틸리티 함수 ─────────────────────────────────────────
+
 function extractJSON(text) {
   const stripped = text.replace(/```json|```/g, "").trim();
   try { return JSON.parse(stripped); } catch {}
@@ -69,35 +65,71 @@ function timeoutPromise(ms) {
   );
 }
 
+// 🔧 수정: 에러 분류를 더 상세하게
 function classifyError(e) {
   const msg = e?.message || String(e);
-  if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("fetch")) {
-    return `[네트워크 에러] 외부 API 연결 실패.\n원본: ${msg}\n\n💡 해결: Cloudflare Worker 프록시를 배포하고 API_BASE를 Worker URL로 변경하세요.`;
+  if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("네트워크")) {
+    return `[네트워크 에러] Worker 연결 실패.\n원본: ${msg}\n\n💡 해결: Cloudflare Worker URL이 올바른지, Worker가 정상 배포되었는지 확인하세요.`;
   }
   if (msg.includes("CORS") || msg.includes("cors") || msg.includes("access-control")) {
-    return `[CORS 에러] 브라우저가 API 서버로의 직접 요청을 차단했습니다.\n원본: ${msg}`;
+    return `[CORS 에러] 브라우저가 Worker로의 요청을 차단했습니다.\n원본: ${msg}\n\n💡 해결: Worker의 ALLOWED_ORIGINS 환경변수를 확인하세요.`;
   }
   if (msg.includes("타임아웃") || msg.includes("timeout") || msg.includes("Timeout")) {
-    return `[타임아웃] API 응답이 제한 시간 내에 돌아오지 않았습니다.\n원본: ${msg}`;
+    return `[타임아웃] API 응답이 제한 시간 내에 돌아오지 않았습니다.\n원본: ${msg}\n\n💡 해결: PDF 파일 크기를 줄이거나, 네트워크 상태를 확인하세요.`;
+  }
+  if (msg.includes("페이로드") || msg.includes("413") || msg.includes("크기 초과")) {
+    return `[페이로드 초과] 전송 데이터가 너무 큽니다.\n원본: ${msg}\n\n💡 해결: 더 작은 PDF 파일을 사용하세요.`;
+  }
+  if (msg.includes("텍스트 추출 실패") || msg.includes("pdf.js") || msg.includes("PDF")) {
+    return `[PDF 처리 에러] PDF에서 텍스트를 추출하지 못했습니다.\n원본: ${msg}\n\n💡 해결: 텍스트 기반 PDF인지 확인하세요.`;
+  }
+  if (msg.includes("파싱 실패") || msg.includes("candidate_name")) {
+    return `[응답 파싱 에러] AI가 올바른 JSON을 반환하지 않았습니다.\n원본: ${msg}\n\n💡 해결: 다시 시도해 주세요.`;
   }
   if (msg.includes("API 4")) return `[API 클라이언트 에러] 요청 형식 또는 인증 문제.\n원본: ${msg}`;
   if (msg.includes("API 5")) return `[API 서버 에러] Anthropic 서버 측 문제.\n원본: ${msg}`;
   return `[알 수 없는 에러] ${msg}`;
 }
 
+// 🔧 수정: callAPI에 상세 로깅 추가
 async function callAPI(payload) {
-  const res = await fetch(API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    throw new Error(`API ${res.status}: ${errBody.slice(0, 400)}`);
+  console.log(`[callAPI] 요청 시작 — 모델: ${payload.model}, 메시지 수: ${payload.messages?.length}`);
+  let res;
+  try {
+    res = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (networkErr) {
+    console.error("[callAPI] 네트워크 에러 (fetch 자체 실패):", networkErr);
+    throw new Error(`[네트워크] Worker 연결 실패: ${networkErr.message}`);
   }
-  const data = await res.json();
+  console.log(`[callAPI] Worker 응답 상태: ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "(응답 본문 읽기 실패)");
+    console.error(`[callAPI] Worker 에러 응답 ${res.status}:`, errBody.slice(0, 600));
+    try {
+      const parsed = JSON.parse(errBody);
+      throw new Error(`API ${res.status} [${parsed.stage || "알 수 없음"}]: ${parsed.error || errBody.slice(0, 400)}`);
+    } catch (parseErr) {
+      if (parseErr.message.startsWith("API ")) throw parseErr;
+      throw new Error(`API ${res.status}: ${errBody.slice(0, 400)}`);
+    }
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch (jsonErr) {
+    console.error("[callAPI] 응답 JSON 파싱 실패:", jsonErr);
+    throw new Error("Worker 응답을 JSON으로 파싱할 수 없습니다.");
+  }
   const text = (data.content || []).map((b) => b.text || "").join("");
-  if (!text.trim()) throw new Error(`빈 응답 (stop_reason: ${data.stop_reason || "unknown"})`);
+  if (!text.trim()) {
+    console.error("[callAPI] 빈 응답:", JSON.stringify(data).slice(0, 300));
+    throw new Error(`빈 응답 (stop_reason: ${data.stop_reason || "unknown"})`);
+  }
+  console.log(`[callAPI] 응답 수신 완료 — 텍스트 길이: ${text.length}자`);
   return text;
 }
 
@@ -122,21 +154,55 @@ async function fileToBase64(file) {
   });
 }
 
+// 🔧 수정: pdf.js 로딩을 Vite에서도 안정적으로 동작하도록 변경
 const PDFJS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
 const PDFJS_WORKER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
 let pdfjsLib = null;
 
 async function loadPdfJs() {
   if (pdfjsLib) return pdfjsLib;
-  pdfjsLib = await import(/* webpackIgnore: true */ PDFJS_CDN);
-  pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
-  return pdfjsLib;
+  console.log("[PDF] pdf.js 라이브러리 로딩 시작...");
+  const startTime = Date.now();
+  try {
+    // @vite-ignore 는 Vite에서 인식하는 동적 import 무시 주석
+    pdfjsLib = await import(/* @vite-ignore */ PDFJS_CDN);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
+    console.log(`[PDF] pdf.js 동적 import 성공 (${Date.now() - startTime}ms)`);
+    return pdfjsLib;
+  } catch (importErr) {
+    console.warn("[PDF] 동적 import 실패, script 태그 폴백:", importErr.message);
+    return new Promise((resolve, reject) => {
+      if (window.pdfjsLib) {
+        pdfjsLib = window.pdfjsLib;
+        pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
+        return resolve(pdfjsLib);
+      }
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.js";
+      script.onload = () => {
+        if (window.pdfjsLib) {
+          pdfjsLib = window.pdfjsLib;
+          pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
+          console.log(`[PDF] script 태그 로딩 성공 (${Date.now() - startTime}ms)`);
+          resolve(pdfjsLib);
+        } else {
+          reject(new Error("pdf.js script 로딩 후 window.pdfjsLib 없음"));
+        }
+      };
+      script.onerror = () => reject(new Error("pdf.js CDN 로딩 실패"));
+      document.head.appendChild(script);
+    });
+  }
 }
 
+// 🔧 수정: 텍스트 추출에 상세 로깅 추가
 async function extractTextFromPDF(file) {
+  console.log(`[PDF] 텍스트 추출 시작: ${file.name} (${(file.size / 1024).toFixed(0)}KB)`);
+  const startTime = Date.now();
   const lib = await loadPdfJs();
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await lib.getDocument({ data: arrayBuffer }).promise;
+  console.log(`[PDF] 문서 열기 완료: ${pdf.numPages}페이지`);
   const pages = [];
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
@@ -145,7 +211,11 @@ async function extractTextFromPDF(file) {
     if (text.trim()) pages.push(text.trim());
   }
   const fullText = pages.join("\n\n");
-  if (fullText.length < 50) return null;
+  console.log(`[PDF] 추출 완료: ${fullText.length}자, ${pages.length}/${pdf.numPages}페이지, ${Date.now() - startTime}ms`);
+  if (fullText.length < 50) {
+    console.warn(`[PDF] 텍스트 50자 미만 — 이미지 기반 PDF 가능성`);
+    return null;
+  }
   return fullText;
 }
 
@@ -161,6 +231,8 @@ async function parallelMap(items, fn, concurrency = 3) {
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
   return results;
 }
+
+// ─── UI 컴포넌트 ─────────────────────────────────────────
 
 const FONT = "'Noto Sans KR', -apple-system, BlinkMacSystemFont, sans-serif";
 const STEPS = ["공고 입력", "평가 기준", "이력서 업로드", "스크리닝 결과"];
@@ -223,70 +295,47 @@ function CriteriaEditor({ initial, onConfirm, onBack }) {
     if (!jobTitle.trim()) { setFormError("직무명을 입력하세요."); return; }
     if (items.some((it) => !it.name.trim())) { setFormError("모든 기준의 이름을 입력하세요."); return; }
     setFormError("");
-    onConfirm({
-      job_title: jobTitle.trim(),
-      criteria: items.map((it) => ({ id: it.id, name: it.name.trim(), description: (it.description || "").trim() })),
-    });
+    onConfirm({ job_title: jobTitle, criteria: items });
   };
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <div>
-          <h2 style={{ fontSize: 20, fontWeight: 600, margin: 0, fontFamily: FONT }}>평가 기준 편집</h2>
-          <p style={{ fontSize: 15, color: "var(--text2)", margin: "5px 0 0", fontFamily: FONT }}>AI가 생성한 기준을 수정·추가·삭제할 수 있습니다</p>
+      <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 15, fontFamily: FONT }}>평가 기준 편집</h2>
+      {formError && (
+        <div style={{ padding: "12px 18px", borderRadius: 10, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", marginBottom: 15, color: "#f87171", fontSize: 15, fontFamily: FONT }}>
+          {formError}
         </div>
-        <button onClick={onBack} style={{ padding: "8px 18px", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: "var(--text2)", fontSize: 15, cursor: "pointer", fontFamily: FONT }}>
-          ← 공고 다시 작성
-        </button>
-      </div>
-
-      <div style={{ marginBottom: 20 }}>
-        <label style={{ fontSize: 15, color: "var(--text3)", fontWeight: 500, display: "block", marginBottom: 8, fontFamily: FONT }}>직무명</label>
-        <input value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder="예: 시니어 백엔드 엔지니어" style={inputBase}
-          onFocus={(e) => (e.target.style.borderColor = "var(--accent)")} onBlur={(e) => (e.target.style.borderColor = "var(--border)")} />
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 15 }}>
-        {items.map((item, idx) => (
-          <div key={item.id} style={{ padding: "20px 23px", borderRadius: 15, border: "1px solid var(--border)", background: "var(--surface)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 15 }}>
-              <span style={{ fontSize: 15, fontFamily: FONT, color: "var(--accent2)", fontWeight: 600 }}>
-                기준 {String(idx + 1).padStart(2, "0")}
-              </span>
-              <button onClick={() => removeItem(idx)} disabled={items.length <= 1}
-                style={{ background: "none", border: "none", fontSize: 23, cursor: items.length > 1 ? "pointer" : "not-allowed", color: items.length > 1 ? "var(--red)" : "var(--text3)", padding: "0 5px", lineHeight: 1 }}>×</button>
-            </div>
-            <div style={{ marginBottom: 13 }}>
-              <label style={{ fontSize: 14, color: "var(--text3)", fontWeight: 500, display: "block", marginBottom: 5, fontFamily: FONT }}>기준명</label>
-              <input value={item.name} onChange={(e) => update(idx, "name", e.target.value)} placeholder="예: Python 백엔드 개발 역량" style={inputBase}
-                onFocus={(e) => (e.target.style.borderColor = "var(--accent)")} onBlur={(e) => (e.target.style.borderColor = "var(--border)")} />
-            </div>
-            <div>
-              <label style={{ fontSize: 14, color: "var(--text3)", fontWeight: 500, display: "block", marginBottom: 5, fontFamily: FONT }}>설명 (이력서에서 확인할 구체적 지표)</label>
-              <textarea value={item.description || ""} onChange={(e) => update(idx, "description", e.target.value)}
-                placeholder="이력서에서 확인해야 할 구체적인 지표나 키워드" rows={2}
-                style={{ ...inputBase, resize: "vertical", lineHeight: 1.5 }}
-                onFocus={(e) => (e.target.style.borderColor = "var(--accent)")} onBlur={(e) => (e.target.style.borderColor = "var(--border)")} />
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {items.length < 7 && (
-        <button onClick={addItem} style={{ marginTop: 15, width: "100%", padding: "15px", borderRadius: 13, border: "1px dashed var(--border)", background: "transparent", color: "var(--text2)", fontSize: 16, cursor: "pointer", fontFamily: FONT }}>
-          + 평가 기준 추가
-        </button>
       )}
-
-      {formError && <p style={{ fontSize: 16, color: "var(--red)", marginTop: 15, fontFamily: FONT }}>{formError}</p>}
-
-      <button onClick={handleConfirm} style={{ marginTop: 20, width: "100%", padding: "18px", borderRadius: 13, border: "none", background: "linear-gradient(135deg, var(--accent), #7c3aed)", color: "#fff", fontSize: 19, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>
-        평가 기준 확정 →
+      <div style={{ marginBottom: 20 }}>
+        <label style={{ fontSize: 14, color: "var(--text2)", fontWeight: 500, marginBottom: 6, display: "block", fontFamily: FONT }}>직무명</label>
+        <input value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder="예: 백엔드 개발자" style={inputBase} />
+      </div>
+      {items.map((it, idx) => (
+        <div key={it.id} style={{ padding: 20, borderRadius: 13, background: "var(--surface)", border: "1px solid var(--border)", marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <span style={{ fontSize: 14, color: "var(--accent2)", fontWeight: 600, fontFamily: FONT }}>기준 {idx + 1}</span>
+            {items.length > 1 && (
+              <button onClick={() => removeItem(idx)} style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 18 }}>×</button>
+            )}
+          </div>
+          <input value={it.name} onChange={(e) => update(idx, "name", e.target.value)} placeholder="기준명" style={{ ...inputBase, marginBottom: 8 }} />
+          <input value={it.description} onChange={(e) => update(idx, "description", e.target.value)} placeholder="상세 설명 (이력서에서 확인할 키워드)" style={inputBase} />
+        </div>
+      ))}
+      <button onClick={addItem} style={{ width: "100%", padding: "13px", borderRadius: 10, border: "1px dashed var(--border)", background: "transparent", color: "var(--text3)", fontSize: 16, cursor: "pointer", marginBottom: 20, fontFamily: FONT }}>
+        + 기준 추가
       </button>
+      <div style={{ display: "flex", gap: 13 }}>
+        <button onClick={onBack} style={{ padding: "18px 30px", borderRadius: 13, border: "1px solid var(--border)", background: "transparent", color: "var(--text2)", fontSize: 18, cursor: "pointer", fontFamily: FONT }}>← 뒤로</button>
+        <button onClick={handleConfirm} style={{ flex: 1, padding: "18px", borderRadius: 13, border: "none", background: "linear-gradient(135deg, var(--accent), #7c3aed)", color: "#fff", fontSize: 19, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>
+          평가 기준 확정 →
+        </button>
+      </div>
     </div>
   );
 }
+
+// ─── 메인 컴포넌트 ─────────────────────────────────────────
 
 export default function AIScreeningTool() {
   const [step, setStep] = useState(0);
@@ -309,33 +358,6 @@ export default function AIScreeningTool() {
   const timerRef = useRef(null);
   const fileRef = useRef();
 
-  // ─────────────────────────────────────────────
-  // [추가] localStorage에서 불러온 마지막 JD/기준 상태
-  // null이면 저장된 데이터 없음 → 불러오기 카드 미표시
-  // ─────────────────────────────────────────────
-  const [lastSavedData, setLastSavedData] = useState(null);
-
-  // ─────────────────────────────────────────────
-  // [추가] 앱 최초 마운트 시: localStorage 확인
-  // saved_jd, saved_criteria 둘 다 있을 때만 카드 표시
-  // ─────────────────────────────────────────────
-  useEffect(() => {
-    try {
-      const savedJD = localStorage.getItem(LS_KEY_JD);
-      const savedCriteria = localStorage.getItem(LS_KEY_CRITERIA);
-      if (savedJD && savedCriteria) {
-        const parsedCriteria = JSON.parse(savedCriteria);
-        // 유효성 검사: criteria 배열이 있어야 함
-        if (parsedCriteria?.criteria?.length > 0) {
-          setLastSavedData({ jd: savedJD, criteria: parsedCriteria });
-        }
-      }
-    } catch {
-      // localStorage 읽기 실패 시 조용히 무시
-    }
-  }, []);
-
-  // 기존 window.storage 로직 (savedTemplates, topCandidates)
   useEffect(() => {
     (async () => {
       try { const res = await window.storage.get("screening-templates"); if (res?.value) setSavedTemplates(JSON.parse(res.value)); } catch {}
@@ -402,9 +424,9 @@ export default function AIScreeningTool() {
     setFetchingUrl(true); setError("");
     try {
       const result = await callClaudeWithTools(
-      [{ role: "user", content: `다음 URL의 채용 공고 내용을 검색해서 추출해 주세요: ${jobUrl}` }],
-      [{ type: "web_search_20250305", name: "web_search" }],
-      SYS_URL_FETCH, MODEL_FAST
+        [{ role: "user", content: `다음 URL의 채용 공고 내용을 검색해서 추출해 주세요: ${jobUrl}` }],
+        [{ type: "web_search_20250305", name: "web_search" }],
+        SYS_URL_FETCH, MODEL_FAST
       );
       if (result?.trim()) { setJobPosting(result.trim()); setJobUrl(""); }
       else { setError("공고 내용을 가져오지 못했습니다."); }
@@ -424,70 +446,14 @@ export default function AIScreeningTool() {
     finally { stopTimer(); setLoading(false); }
   }, [jobPosting, startTimer, stopTimer]);
 
-  // ─────────────────────────────────────────────
-  // [수정] 평가 기준 확정 시 localStorage에 자동 저장
-  // saved_jd  : 현재 입력된 채용 공고 텍스트
-  // saved_criteria : 확정된 평가 기준 객체 (JSON)
-  // ─────────────────────────────────────────────
   const handleConfirmCriteria = useCallback((final_) => {
-    setConfirmedCriteria(final_);
-    setSaveName(final_.job_title || "");
-    setStep(2);
-
-    // localStorage 저장
-    try {
-      localStorage.setItem(LS_KEY_JD, jobPosting);
-      localStorage.setItem(LS_KEY_CRITERIA, JSON.stringify(final_));
-      // 불러오기 카드 상태도 최신화
-      setLastSavedData({ jd: jobPosting, criteria: final_ });
-    } catch {
-      // 저장 실패 시 조용히 무시 (핵심 기능에 영향 없음)
-    }
-  }, [jobPosting]);
-
-  // ─────────────────────────────────────────────
-  // [추가] 불러오기 카드 — 버튼 핸들러 3종
-  // ─────────────────────────────────────────────
-
-  // 버튼 1: 저장된 기준으로 바로 Step 2(이력서 업로드)로 이동
-  const handleLoadAndSkip = useCallback(() => {
-    if (!lastSavedData) return;
-    setJobPosting(lastSavedData.jd);
-    setCriteria(lastSavedData.criteria);
-    setConfirmedCriteria(lastSavedData.criteria);
-    setSaveName(lastSavedData.criteria.job_title || "");
-    setError("");
-    setStep(2); // Step 2 = 이력서 업로드 화면
-  }, [lastSavedData]);
-
-  // 버튼 2: 저장된 기준을 불러와 Step 1(평가 기준 수정)으로 이동
-  const handleLoadAndEdit = useCallback(() => {
-    if (!lastSavedData) return;
-    setJobPosting(lastSavedData.jd);
-    setCriteria(lastSavedData.criteria);
-    setConfirmedCriteria(lastSavedData.criteria);
-    setError("");
-    setStep(1); // Step 1 = 평가 기준 편집 화면
-  }, [lastSavedData]);
-
-  // 버튼 3: localStorage 초기화 후 빈 Step 0(공고 입력)으로 이동
-  const handleClearAndReset = useCallback(() => {
-    try {
-      localStorage.removeItem(LS_KEY_JD);
-      localStorage.removeItem(LS_KEY_CRITERIA);
-    } catch {}
-    setLastSavedData(null); // 카드 숨김
-    setJobPosting("");
-    setJobUrl("");
-    setCriteria(null);
-    setConfirmedCriteria(null);
-    setError("");
-    setStep(0);
+    setConfirmedCriteria(final_); setSaveName(final_.job_title || ""); setStep(2);
   }, []);
 
   const handleFiles = (e) => setFiles((prev) => [...prev, ...Array.from(e.target.files).filter((f) => f.type === "application/pdf")]);
   const removeFile = (idx) => setFiles((prev) => prev.filter((_, i) => i !== idx));
 
+  // 🔧 수정: screenResumes 내부의 processOne에 상세 로깅 + 안전한 PDF 처리
   const screenResumes = useCallback(async () => {
     const c = confirmedCriteria;
     if (!files.length || !c) return;
@@ -497,39 +463,61 @@ export default function AIScreeningTool() {
     const criteriaCompact = c.criteria.map((cr) => `[ID:${cr.id}] ${cr.name}: ${cr.description}`).join("\n");
     let completedCount = 0;
 
+    // 🔧 수정: processOne 함수 — 핵심 변경 부분
     const processOne = async (file) => {
+      const fileLabel = `[${file.name}]`;
       try {
-        if (file.size > MAX_SIZE) throw new Error(`파일 크기 초과 (${(file.size / 1024 / 1024).toFixed(1)}MB)`);
+        if (file.size > MAX_SIZE) throw new Error(`파일 크기 초과 (${(file.size / 1024 / 1024).toFixed(1)}MB > 30MB)`);
+
         let content;
+        let extractedText = null;
+
+        // ── PDF 텍스트 추출 시도 ──
         try {
-          const text = await extractTextFromPDF(file);
-          if (text) {
-            content = [{ type: "text", text: `[이력서 텍스트 시작]\n${text.slice(0, 12000)}\n[이력서 텍스트 끝]\n\n직무: ${c.job_title}\n\n평가 기준:\n${criteriaCompact}\n\n위 기준에 따라 이 이력서를 심사하세요.` }];
-          } else {
-            const base64 = await fileToBase64(file);
-            content = [
-              { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-              { type: "text", text: `직무: ${c.job_title}\n\n평가 기준:\n${criteriaCompact}\n\n위 기준에 따라 이 이력서를 심사하세요. 이미지 기반 PDF이므로 텍스트를 읽어서 분석하세요.` },
-            ];
+          extractedText = await extractTextFromPDF(file);
+        } catch (pdfErr) {
+          console.error(`${fileLabel} PDF 텍스트 추출 실패:`, pdfErr.message);
+          throw new Error(`PDF 텍스트 추출 실패: ${pdfErr.message}\n💡 이미지 스캔 PDF이거나 암호화된 파일일 수 있습니다.`);
+        }
+
+        if (extractedText) {
+          // ✅ 텍스트 추출 성공 → 텍스트만 전송
+          console.log(`${fileLabel} 텍스트 모드 (${extractedText.length}자)`);
+          content = [{ type: "text", text: `[이력서 텍스트 시작]\n${extractedText.slice(0, 12000)}\n[이력서 텍스트 끝]\n\n직무: ${c.job_title}\n\n평가 기준:\n${criteriaCompact}\n\n위 기준에 따라 이 이력서를 심사하세요.` }];
+        } else {
+          // ⚠️ 이미지 기반 PDF → base64 (크기 제한 강화)
+          console.warn(`${fileLabel} 텍스트 없음 → base64 모드`);
+          if (file.size > 5 * 1024 * 1024) {
+            throw new Error(`이미지 기반 PDF(${(file.size / 1024 / 1024).toFixed(1)}MB)는 5MB 이하만 지원됩니다.\n💡 텍스트 기반으로 다시 저장하거나 크기를 줄여주세요.`);
           }
-        } catch {
           const base64 = await fileToBase64(file);
+          console.log(`${fileLabel} base64 변환: ${(base64.length / 1024).toFixed(0)}KB`);
           content = [
             { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-            { type: "text", text: `직무: ${c.job_title}\n\n평가 기준:\n${criteriaCompact}\n\n위 기준에 따라 이 이력서를 심사하세요.` },
+            { type: "text", text: `이 PDF는 이미지 기반이므로 텍스트를 읽어서 분석하세요.\n\n직무: ${c.job_title}\n\n평가 기준:\n${criteriaCompact}\n\n위 기준에 따라 이 이력서를 심사하세요.` },
           ];
         }
+
+        // ── API 호출 ──
+        console.log(`${fileLabel} API 호출 시작`);
         const res = await Promise.race([
           callAPI({ model: MODEL_FAST, max_tokens: 2000, system: SYS_SCREENING, messages: [{ role: "user", content }] }),
           timeoutPromise(120000),
         ]);
+
+        // ── 응답 파싱 ──
         const parsed = extractJSON(res);
-        if (!parsed?.candidate_name) throw new Error("AI 응답 파싱 실패");
+        if (!parsed?.candidate_name) {
+          console.error(`${fileLabel} JSON 파싱 실패. 원본:`, res.slice(0, 500));
+          throw new Error("AI 응답 파싱 실패");
+        }
+        console.log(`${fileLabel} ✅ ${parsed.candidate_name} → ${parsed.recommendation}`);
         parsed._fileName = file.name;
         completedCount++;
         setLoadingMsg(`이력서 분석 중 (${completedCount}/${files.length} 완료)`);
         return parsed;
       } catch (e) {
+        console.error(`${fileLabel} ❌ 분석 실패:`, e.message);
         completedCount++;
         setLoadingMsg(`이력서 분석 중 (${completedCount}/${files.length} 완료)`);
         return {
@@ -555,6 +543,8 @@ export default function AIScreeningTool() {
     setFiles([]); setResults([]); setError(""); setJobPosting(""); setJobUrl("");
     setSaveName(""); setSaveSuccess(false);
   };
+
+  // ─── 렌더링 ────────────────────────────────────────────
 
   return (
     <div style={{
@@ -601,8 +591,7 @@ export default function AIScreeningTool() {
             </p>
             <button
               onClick={() => { stopTimer(); setLoading(false); setStep((prev) => (prev === 3 ? 2 : prev)); setError("사용자가 취소했습니다."); }}
-              style={{ marginTop: 25, padding: "10px 25px", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: "var(--text2)", fontSize: 16, cursor: "pointer", fontFamily: FONT }}
-            >
+              style={{ marginTop: 25, padding: "10px 25px", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: "var(--text2)", fontSize: 16, cursor: "pointer", fontFamily: FONT }}>
               취소
             </button>
           </div>
@@ -619,112 +608,6 @@ export default function AIScreeningTool() {
         {/* STEP 0 */}
         {step === 0 && !loading && (
           <div>
-
-            {/* ─────────────────────────────────────────────
-                [추가] 불러오기 카드
-                localStorage에 저장된 데이터가 있을 때만 표시됨
-                ───────────────────────────────────────────── */}
-            {lastSavedData && (
-              <div style={{
-                marginBottom: 30,
-                padding: "22px 25px",
-                borderRadius: 16,
-                border: "1px solid rgba(99,102,241,0.4)",
-                background: "linear-gradient(135deg, rgba(99,102,241,0.07), rgba(168,85,247,0.07))",
-              }}>
-                {/* 카드 제목 + 공고 미리보기 */}
-                <div style={{ display: "flex", alignItems: "flex-start", gap: 13, marginBottom: 18 }}>
-                  <div style={{ width: 40, height: 40, borderRadius: 11, background: "linear-gradient(135deg, var(--accent), #a78bfa)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 19, flexShrink: 0 }}>
-                    💾
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <p style={{ fontSize: 13, color: "var(--accent2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", margin: "0 0 4px", fontFamily: FONT }}>
-                      최근 사용한 평가 기준
-                    </p>
-                    {/* 직무명 */}
-                    <p style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", margin: "0 0 4px", fontFamily: FONT }}>
-                      {lastSavedData.criteria.job_title || "저장된 공고"}
-                    </p>
-                    {/* 평가 기준 개수 + JD 앞부분 미리보기 */}
-                    <p style={{ fontSize: 14, color: "var(--text3)", margin: 0, fontFamily: FONT }}>
-                      평가 기준 {lastSavedData.criteria.criteria.length}개
-                      {lastSavedData.criteria.criteria.slice(0, 3).map((c) => ` · ${c.name}`).join("")}
-                      {lastSavedData.criteria.criteria.length > 3 ? " …" : ""}
-                    </p>
-                    {/* JD 앞부분 미리보기 (최대 80자) */}
-                    {lastSavedData.jd && (
-                      <p style={{ fontSize: 13, color: "var(--text3)", margin: "6px 0 0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: FONT }}>
-                        📄 {lastSavedData.jd.slice(0, 80)}{lastSavedData.jd.length > 80 ? "…" : ""}
-                      </p>
-                    )}
-                  </div>
-                </div>
-
-                {/* 버튼 3종 */}
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  {/* 버튼 1: 바로 스크리닝 시작 (Step 1, 2 건너뜀) */}
-                  <button
-                    onClick={handleLoadAndSkip}
-                    style={{
-                      flex: "1 1 180px",
-                      padding: "13px 18px",
-                      borderRadius: 11,
-                      border: "none",
-                      background: "linear-gradient(135deg, var(--accent), #7c3aed)",
-                      color: "#fff",
-                      fontSize: 15,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      fontFamily: FONT,
-                      letterSpacing: "-0.01em",
-                    }}
-                  >
-                    ⚡ 이 기준으로 바로 스크리닝
-                  </button>
-
-                  {/* 버튼 2: 평가 기준 수정 후 Step 1로 이동 */}
-                  <button
-                    onClick={handleLoadAndEdit}
-                    style={{
-                      flex: "1 1 140px",
-                      padding: "13px 18px",
-                      borderRadius: 11,
-                      border: "1px solid rgba(99,102,241,0.4)",
-                      background: "rgba(99,102,241,0.08)",
-                      color: "var(--accent2)",
-                      fontSize: 15,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      fontFamily: FONT,
-                    }}
-                  >
-                    ✏️ 평가 기준 수정하기
-                  </button>
-
-                  {/* 버튼 3: localStorage 초기화 후 새로 시작 */}
-                  <button
-                    onClick={handleClearAndReset}
-                    style={{
-                      flex: "1 1 140px",
-                      padding: "13px 18px",
-                      borderRadius: 11,
-                      border: "1px solid var(--border)",
-                      background: "transparent",
-                      color: "var(--text3)",
-                      fontSize: 15,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                      fontFamily: FONT,
-                    }}
-                  >
-                    🗑 새로운 공고 등록
-                  </button>
-                </div>
-              </div>
-            )}
-            {/* ─── 불러오기 카드 끝 ─── */}
-
-            {/* 기존 저장된 공고(savedTemplates) 목록 */}
             {savedTemplates.length > 0 && (
               <div style={{ marginBottom: 30 }}>
                 <p style={{ fontSize: 15, color: "var(--text3)", fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 13, fontFamily: FONT }}>
@@ -732,40 +615,24 @@ export default function AIScreeningTool() {
                 </p>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {savedTemplates.map((tpl) => (
-                    <div key={tpl.id}
-                      style={{ display: "flex", alignItems: "center", padding: "15px 20px", borderRadius: 13, background: "var(--surface)", border: "1px solid var(--border)", cursor: "pointer", transition: "border-color 0.2s" }}
-                      onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
-                      onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
-                    >
-                      <div style={{ flex: 1, minWidth: 0 }} onClick={() => loadTemplate(tpl)}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 3 }}>
-                          <span style={{ fontSize: 18, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: FONT }}>{tpl.name}</span>
-                          <span style={{ fontSize: 14, color: "var(--accent2)", fontFamily: FONT, flexShrink: 0 }}>{tpl.criteria?.length || 0}개 기준</span>
-                        </div>
-                        <p style={{ fontSize: 15, color: "var(--text3)", margin: 0, fontFamily: FONT }}>{tpl.job_title} · {tpl.savedAt}</p>
+                    <div key={tpl.id} style={{ display: "flex", alignItems: "center", padding: "13px 18px", borderRadius: 10, background: "var(--surface)", border: "1px solid var(--border)", cursor: "pointer" }} onClick={() => loadTemplate(tpl)}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <p style={{ fontSize: 16, fontWeight: 600, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: FONT }}>{tpl.name}</p>
+                        <p style={{ fontSize: 14, color: "var(--text3)", margin: "3px 0 0", fontFamily: FONT }}>{tpl.job_title} · {tpl.criteria?.length}개 기준 · {tpl.savedAt}</p>
                       </div>
-                      <button onClick={(e) => { e.stopPropagation(); deleteTemplate(tpl.id); }}
-                        style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 19, padding: "5px 10px", flexShrink: 0, lineHeight: 1, borderRadius: 8 }}
-                        title="삭제">×</button>
+                      <button onClick={(e) => { e.stopPropagation(); deleteTemplate(tpl.id); }} style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 18, padding: "0 5px" }}>×</button>
                     </div>
                   ))}
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 18, margin: "25px 0 0" }}>
-                  <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
-                  <span style={{ fontSize: 15, color: "var(--text3)", fontWeight: 500, fontFamily: FONT }}>또는 새로 입력</span>
-                  <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
                 </div>
               </div>
             )}
 
-            <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 8, fontFamily: FONT }}>채용 공고를 입력하세요</h2>
-            <p style={{ fontSize: 16, color: "var(--text2)", marginBottom: 20, lineHeight: 1.5, fontFamily: FONT }}>공고를 직접 붙여넣거나, URL을 입력하면 자동으로 가져옵니다.</p>
+            <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 10, fontFamily: FONT }}>채용 공고 입력</h2>
             <textarea value={jobPosting} onChange={(e) => setJobPosting(e.target.value)}
-              placeholder={"채용 공고 전문을 여기에 붙여넣으세요...\n\n예시:\n[포지션] 시니어 백엔드 개발자\n[주요업무] 대규모 트래픽 처리 시스템 설계 및 개발...\n[자격요건] Java/Kotlin 기반 개발 경력 5년 이상..."}
-              style={{ ...inputBase, minHeight: 250, padding: 20, borderRadius: 15, fontSize: 18, lineHeight: 1.6, resize: "vertical" }}
-              onFocus={(e) => (e.target.style.borderColor = "var(--accent)")} onBlur={(e) => (e.target.style.borderColor = "var(--border)")} />
+              placeholder="채용 공고 내용을 붙여넣으세요..."
+              style={{ ...inputBase, minHeight: 200, resize: "vertical", lineHeight: 1.6 }} />
 
-            <div style={{ display: "flex", alignItems: "center", gap: 18, margin: "23px 0" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "20px 0" }}>
               <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
               <span style={{ fontSize: 15, color: "var(--text3)", fontWeight: 500, fontFamily: FONT }}>또는 URL로 가져오기</span>
               <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
@@ -777,9 +644,7 @@ export default function AIScreeningTool() {
                 <input type="url" value={jobUrl} onChange={(e) => setJobUrl(e.target.value)}
                   placeholder="채용 공고 URL" disabled={fetchingUrl}
                   style={{ flex: 1, padding: "16px 18px", border: "none", background: "transparent", color: "var(--text)", fontSize: 18, outline: "none", fontFamily: FONT }}
-                  onKeyDown={(e) => { if (e.key === "Enter" && jobUrl.trim()) fetchJobPosting(); }}
-                  onFocus={(e) => (e.target.parentElement.style.borderColor = "var(--accent)")}
-                  onBlur={(e) => (e.target.parentElement.style.borderColor = "var(--border)")} />
+                  onKeyDown={(e) => { if (e.key === "Enter" && jobUrl.trim()) fetchJobPosting(); }} />
               </div>
               <button onClick={fetchJobPosting} disabled={!jobUrl.trim() || fetchingUrl}
                 style={{ padding: "0 25px", borderRadius: 13, border: "1px solid var(--border)", background: jobUrl.trim() && !fetchingUrl ? "var(--surface2)" : "var(--surface)", color: jobUrl.trim() && !fetchingUrl ? "var(--text)" : "var(--text3)", fontSize: 16, fontWeight: 600, cursor: jobUrl.trim() && !fetchingUrl ? "pointer" : "not-allowed", whiteSpace: "nowrap", fontFamily: FONT }}>
@@ -902,149 +767,98 @@ export default function AIScreeningTool() {
           </div>
         )}
 
-        {/* STEP 3 */}
+        {/* STEP 3 — 결과 */}
         {step === 3 && !loading && results.length > 0 && (
           <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 25 }}>
-              <div>
-                <h2 style={{ fontSize: 20, fontWeight: 600, margin: 0, fontFamily: FONT }}>스크리닝 결과</h2>
-                <p style={{ fontSize: 16, color: "var(--text2)", margin: "5px 0 0", fontFamily: FONT }}>
-                  {results.length}명 · 통과 {results.filter((r) => r.recommendation === "PASS").length} · 검토 {results.filter((r) => r.recommendation === "MAYBE").length} · 탈락 {results.filter((r) => r.recommendation === "FAIL").length}
-                </p>
-              </div>
-              <button onClick={resetAll} style={{ padding: "8px 18px", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: "var(--text2)", fontSize: 15, cursor: "pointer", fontFamily: FONT }}>새로 시작</button>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <h2 style={{ fontSize: 20, fontWeight: 600, margin: 0, fontFamily: FONT }}>스크리닝 결과 ({results.length}명)</h2>
+              <button onClick={resetAll} style={{ padding: "10px 20px", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: "var(--text2)", fontSize: 15, cursor: "pointer", fontFamily: FONT }}>
+                새로 시작
+              </button>
             </div>
 
-            <div style={{ marginBottom: 25, padding: "20px 23px", borderRadius: 15, background: "linear-gradient(135deg, rgba(99,102,241,0.06), rgba(168,85,247,0.06))", border: "1px solid rgba(99,102,241,0.2)" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 15 }}>
-                <p style={{ fontSize: 15, color: "var(--accent2)", fontWeight: 600, margin: 0, textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: FONT }}>🏆 추천 순위</p>
-                {topCandidates.length === 2 && (
-                  <button onClick={swapTopCandidates} style={{ fontSize: 14, color: "var(--text3)", background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "4px 13px", cursor: "pointer", fontFamily: FONT }}>
-                    ↕ 순위 교체
-                  </button>
-                )}
-              </div>
-              <div style={{ display: "flex", gap: 13 }}>
-                {[1, 2].map((rank) => {
-                  const pick = topCandidates.find((t) => t.rank === rank);
-                  return (
-                    <div key={rank} style={{ flex: 1, padding: "15px 18px", borderRadius: 13, background: pick ? "var(--surface)" : "var(--surface2)", border: `1px solid ${pick ? (rank === 1 ? "rgba(34,197,94,0.3)" : "rgba(99,102,241,0.3)") : "var(--border)"}`, position: "relative" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: pick ? 10 : 0 }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: 8, fontSize: 14, fontWeight: 700, fontFamily: FONT, background: rank === 1 ? "rgba(34,197,94,0.15)" : "rgba(99,102,241,0.15)", color: rank === 1 ? "var(--green)" : "var(--accent2)" }}>
-                          {rank}
-                        </span>
-                        {pick ? (
-                          <span style={{ fontSize: 16, fontWeight: 600, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: FONT }}>{pick.candidate_name}</span>
-                        ) : (
-                          <span style={{ fontSize: 15, color: "var(--text3)", fontFamily: FONT }}>아래 결과에서 선택하세요</span>
-                        )}
-                        {pick && (
-                          <button onClick={() => removeTopCandidate(rank)} style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 18, padding: "0 3px", lineHeight: 1 }}>×</button>
-                        )}
-                      </div>
-                      {pick && (
-                        <div>
-                          <p style={{ fontSize: 14, color: "var(--text2)", margin: "0 0 5px", lineHeight: 1.4, fontFamily: FONT }}>{pick.summary}</p>
-                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                            <RecBadge rec={pick.recommendation} />
-                            <span style={{ fontSize: 14, color: "var(--text3)", padding: "4px 10px", borderRadius: 15, background: "var(--surface2)", fontFamily: FONT }}>
-                              {pick._jobTitle} · {pick._savedAt}
-                            </span>
-                          </div>
-                          {pick.strength && pick.strength !== "-" && (
-                            <p style={{ fontSize: 14, color: "var(--green)", margin: "8px 0 0", fontFamily: FONT }}>💪 {pick.strength}</p>
-                          )}
-                        </div>
+            {/* 추천 순위 슬롯 */}
+            <div style={{ display: "flex", gap: 13, marginBottom: 25 }}>
+              {[1, 2].map((rank) => {
+                const pick = topCandidates.find((t) => t.rank === rank);
+                return (
+                  <div key={rank} style={{ flex: 1, padding: "18px", borderRadius: 13, background: pick ? "var(--surface)" : "var(--surface2)", border: `1px solid ${pick ? (rank === 1 ? "rgba(34,197,94,0.3)" : "rgba(99,102,241,0.3)") : "var(--border)"}`, position: "relative" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: pick ? 10 : 0 }}>
+                      <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: 8, fontSize: 14, fontWeight: 700, fontFamily: FONT, background: rank === 1 ? "rgba(34,197,94,0.15)" : "rgba(99,102,241,0.15)", color: rank === 1 ? "var(--green)" : "var(--accent2)" }}>
+                        {rank}
+                      </span>
+                      {pick ? (
+                        <span style={{ fontSize: 16, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, fontFamily: FONT }}>{pick.candidate_name}</span>
+                      ) : (
+                        <span style={{ fontSize: 15, color: "var(--text3)", fontFamily: FONT }}>아래 결과에서 선택하세요</span>
                       )}
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-              {results.map((r, idx) => {
-                const isOpen = expandedIdx === idx;
-                const evs = r.evaluations || [];
-                const metCount = evs.filter((ev) => ev.status === "충족").length;
-                const isTop1 = topCandidates.some((t) => t.rank === 1 && t.candidate_name === r.candidate_name && t._fileName === r._fileName);
-                const isTop2 = topCandidates.some((t) => t.rank === 2 && t.candidate_name === r.candidate_name && t._fileName === r._fileName);
-                return (
-                  <div key={idx} style={{ borderRadius: 15, border: `1px solid ${isTop1 ? "rgba(34,197,94,0.4)" : isTop2 ? "rgba(99,102,241,0.4)" : r._error ? "rgba(239,68,68,0.3)" : "var(--border)"}`, background: "var(--surface)", overflow: "hidden" }}>
-                    <div onClick={() => setExpandedIdx(isOpen ? null : idx)} style={{ padding: "20px 23px", cursor: "pointer", display: "flex", alignItems: "center", gap: 18 }}>
-                      <div style={{ width: 45, height: 45, borderRadius: 13, background: "var(--surface2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, fontWeight: 700, fontFamily: FONT, color: "var(--accent2)", flexShrink: 0 }}>{idx + 1}</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5 }}>
-                          <span style={{ fontSize: 18, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: FONT }}>{r.candidate_name}</span>
-                          <RecBadge rec={r.recommendation} />
-                          {isTop1 && <span style={{ fontSize: 13, color: "var(--green)", fontWeight: 700, background: "rgba(34,197,94,0.12)", padding: "3px 8px", borderRadius: 5, fontFamily: FONT }}>1순위</span>}
-                          {isTop2 && <span style={{ fontSize: 13, color: "var(--accent2)", fontWeight: 700, background: "rgba(99,102,241,0.12)", padding: "3px 8px", borderRadius: 5, fontFamily: FONT }}>2순위</span>}
-                        </div>
-                        <p style={{ fontSize: 15, color: "var(--text2)", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: FONT }}>{r.summary}</p>
-                      </div>
-                      <div style={{ textAlign: "center", flexShrink: 0, marginLeft: 10 }}>
-                        <div style={{ fontSize: 23, fontWeight: 700, fontFamily: FONT, color: metCount === evs.length ? "var(--green)" : metCount >= evs.length / 2 ? "var(--amber)" : "var(--red)" }}>
-                          {metCount}/{evs.length}
-                        </div>
-                        <div style={{ fontSize: 13, color: "var(--text3)", fontFamily: FONT }}>충족</div>
-                      </div>
-                      <span style={{ color: "var(--text3)", transition: "transform 0.2s", transform: isOpen ? "rotate(180deg)" : "rotate(0)", flexShrink: 0 }}>▾</span>
-                    </div>
-
-                    {isOpen && (
-                      <div style={{ padding: "20px 23px 23px", borderTop: "1px solid var(--border)" }}>
-                        {!r._error && (
-                          <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setAsTopCandidate(r, 1); }}
-                              style={{ flex: 1, padding: "13px", borderRadius: 10, fontSize: 16, fontWeight: 600, cursor: "pointer", border: isTop1 ? "1px solid var(--green)" : "1px solid var(--border)", background: isTop1 ? "rgba(34,197,94,0.1)" : "var(--surface2)", color: isTop1 ? "var(--green)" : "var(--text2)", fontFamily: FONT }}
-                            >
-                              {isTop1 ? "✓ 1순위 지정됨" : "🥇 1순위로 지정"}
-                            </button>
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setAsTopCandidate(r, 2); }}
-                              style={{ flex: 1, padding: "13px", borderRadius: 10, fontSize: 16, fontWeight: 600, cursor: "pointer", border: isTop2 ? "1px solid var(--accent2)" : "1px solid var(--border)", background: isTop2 ? "rgba(99,102,241,0.1)" : "var(--surface2)", color: isTop2 ? "var(--accent2)" : "var(--text2)", fontFamily: FONT }}
-                            >
-                              {isTop2 ? "✓ 2순위 지정됨" : "🥈 2순위로 지정"}
-                            </button>
-                          </div>
-                        )}
-
-                        <p style={{ fontSize: 14, color: "var(--text3)", marginBottom: 5, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: FONT }}>파일</p>
-                        <p style={{ fontSize: 16, color: "var(--text2)", marginBottom: 20, fontFamily: FONT }}>{r._fileName}</p>
-
-                        <p style={{ fontSize: 14, color: "var(--text3)", marginBottom: 13, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: FONT }}>기준별 평가</p>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 20 }}>
-                          {evs.map((ev) => {
-                            const crit = confirmedCriteria?.criteria.find((c) => c.id === ev.criteria_id);
-                            return (
-                              <div key={ev.criteria_id} style={{ padding: "18px 20px", borderRadius: 13, background: "var(--surface2)", border: "1px solid var(--border)" }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 13 }}>
-                                  <span style={{ fontSize: 16, fontWeight: 600, fontFamily: FONT }}>{crit?.name || `기준 ${ev.criteria_id}`}</span>
-                                  <StatusBadge status={ev.status} />
-                                </div>
-                                <p style={{ fontSize: 15, color: "var(--text2)", margin: 0, lineHeight: 1.7, whiteSpace: "pre-line", paddingLeft: 3, fontFamily: FONT }}>{ev.reason}</p>
-                              </div>
-                            );
-                          })}
-                        </div>
-
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 13 }}>
-                          <div style={{ padding: "15px 18px", borderRadius: 10, background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)" }}>
-                            <p style={{ fontSize: 14, color: "var(--green)", fontWeight: 600, margin: "0 0 5px", fontFamily: FONT }}>강점</p>
-                            <p style={{ fontSize: 15, color: "var(--text2)", margin: 0, lineHeight: 1.4, fontFamily: FONT }}>{r.strength}</p>
-                          </div>
-                          <div style={{ padding: "15px 18px", borderRadius: 10, background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.15)" }}>
-                            <p style={{ fontSize: 14, color: "var(--red)", fontWeight: 600, margin: "0 0 5px", fontFamily: FONT }}>약점 {r._error && "/ 에러 상세"}</p>
-                            <p style={{ fontSize: 15, color: "var(--text2)", margin: 0, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: FONT }}>{r.weakness}</p>
-                          </div>
-                        </div>
-                      </div>
+                    {pick && (
+                      <>
+                        <p style={{ fontSize: 14, color: "var(--text3)", margin: "0 0 3px", fontFamily: FONT }}>{pick._jobTitle}</p>
+                        <p style={{ fontSize: 14, color: "var(--text2)", margin: 0, fontFamily: FONT }}>💪 {pick.strength}</p>
+                        <button onClick={() => removeTopCandidate(rank)} style={{ position: "absolute", top: 10, right: 10, background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 16 }}>×</button>
+                      </>
                     )}
                   </div>
                 );
               })}
+              {topCandidates.length >= 2 && (
+                <button onClick={swapTopCandidates} style={{ alignSelf: "center", padding: "8px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text2)", cursor: "pointer", fontSize: 16 }}>⇄</button>
+              )}
             </div>
+
+            {/* 결과 카드 */}
+            {results.map((r, idx) => (
+              <div key={idx} style={{ marginBottom: 12, borderRadius: 13, border: `1px solid ${r._error ? "rgba(239,68,68,0.3)" : "var(--border)"}`, background: "var(--surface)", overflow: "hidden" }}>
+                <div onClick={() => setExpandedIdx(expandedIdx === idx ? null : idx)}
+                  style={{ display: "flex", alignItems: "center", padding: "18px 20px", cursor: "pointer", gap: 15 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5 }}>
+                      <span style={{ fontSize: 17, fontWeight: 600, fontFamily: FONT }}>{r.candidate_name}</span>
+                      <RecBadge rec={r.recommendation} />
+                    </div>
+                    <p style={{ fontSize: 15, color: "var(--text2)", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: FONT }}>{r.summary}</p>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                    {!r._error && [1, 2].map((rank) => (
+                      <button key={rank} onClick={(e) => { e.stopPropagation(); setAsTopCandidate(r, rank); }}
+                        style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border)", background: topCandidates.find((t) => t.rank === rank && t.candidate_name === r.candidate_name) ? (rank === 1 ? "rgba(34,197,94,0.15)" : "rgba(99,102,241,0.15)") : "transparent", color: rank === 1 ? "var(--green)" : "var(--accent2)", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>
+                        {rank}순위
+                      </button>
+                    ))}
+                    <span style={{ fontSize: 18, color: "var(--text3)", cursor: "pointer" }}>{expandedIdx === idx ? "▲" : "▼"}</span>
+                  </div>
+                </div>
+
+                {expandedIdx === idx && (
+                  <div style={{ padding: "0 20px 20px", borderTop: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", gap: 15, margin: "15px 0" }}>
+                      <div style={{ flex: 1, padding: "13px 15px", borderRadius: 10, background: "rgba(34,197,94,0.05)", border: "1px solid rgba(34,197,94,0.15)" }}>
+                        <p style={{ fontSize: 13, color: "var(--green)", fontWeight: 600, margin: "0 0 5px", fontFamily: FONT }}>강점</p>
+                        <p style={{ fontSize: 15, color: "var(--text)", margin: 0, lineHeight: 1.5, fontFamily: FONT }}>{r.strength}</p>
+                      </div>
+                      <div style={{ flex: 1, padding: "13px 15px", borderRadius: 10, background: "rgba(239,68,68,0.05)", border: "1px solid rgba(239,68,68,0.15)" }}>
+                        <p style={{ fontSize: 13, color: "var(--red)", fontWeight: 600, margin: "0 0 5px", fontFamily: FONT }}>약점</p>
+                        <p style={{ fontSize: 15, color: "var(--text)", margin: 0, lineHeight: 1.5, fontFamily: FONT }}>{r.weakness}</p>
+                      </div>
+                    </div>
+                    {r.evaluations?.map((ev, eidx) => {
+                      const cr = confirmedCriteria?.criteria?.find((c) => c.id === ev.criteria_id);
+                      return (
+                        <div key={eidx} style={{ padding: "15px", borderRadius: 10, background: "var(--surface2)", marginBottom: 8 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                            <span style={{ fontSize: 15, fontWeight: 600, fontFamily: FONT }}>{cr?.name || `기준 ${ev.criteria_id}`}</span>
+                            <StatusBadge status={ev.status} />
+                          </div>
+                          <p style={{ fontSize: 14, color: "var(--text2)", margin: 0, lineHeight: 1.6, whiteSpace: "pre-wrap", fontFamily: FONT }}>{ev.reason}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </div>
