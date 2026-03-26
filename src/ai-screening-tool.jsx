@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 // ─── 설정 ──────────────────────────────────────────────────
-const API_URL = "https://ai-screener-api.qkrcksgud91.workers.dev";
+const API_URL = "/api/screen";
 const MODEL_SMART = "claude-sonnet-4-6";
 const MODEL_FAST = "claude-haiku-4-5-20251001";
 const LS_TEMPLATES = "screening-templates";
