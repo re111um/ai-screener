@@ -197,7 +197,7 @@ function Sidebar({ templates, onSelect, onDelete, open, onToggle }) {
         <p style={{fontSize:14,fontWeight:600,color:"var(--accent2)",margin:0,textTransform:"uppercase",letterSpacing:"0.06em"}}>저장된 공고 · {templates.length}</p>
       </div>
       <div style={{flex:1,overflowY:"auto",padding:"12px"}}>
-        {templates.length===0 && <p style={{fontSize:14,color:"var(--text3)",textAlign:"center",marginTop:40,lineHeight:1.6}}>아직 저장된 공고가 없습니다.<br/>공고 분석 후 저장해 보세요.</p>}
+        {templates.length===0 && <p style={{fontSize:14,color:"var(--text3)",textAlign:"center",marginTop:40,lineHeight:1.6}}>아직 저장된 공고가 없습니다.<br/>평가 기준 확정 시 자동 저장됩니다.</p>}
         {templates.map(tpl => (
           <div key={tpl.id} onClick={() => onSelect(tpl)} style={{padding:"14px",marginBottom:8,borderRadius:10,background:"var(--surface2)",border:"1px solid var(--border)",cursor:"pointer",transition:"border-color 0.15s"}}
             onMouseEnter={e => e.currentTarget.style.borderColor="var(--accent)"} onMouseLeave={e => e.currentTarget.style.borderColor="var(--border)"}>
@@ -298,8 +298,6 @@ export default function AIScreeningTool() {
   const [expandedIdx, setExpandedIdx] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [savedTemplates, setSavedTemplates] = useState([]);
-  const [saveName, setSaveName] = useState("");
-  const [saveSuccess, setSaveSuccess] = useState(false);
   const [topCandidates, setTopCandidates] = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [modalTemplate, setModalTemplate] = useState(null);
@@ -307,30 +305,31 @@ export default function AIScreeningTool() {
   const timerRef = useRef(null);
   const fileRef = useRef();
 
-  // localStorage 복원
+  // ── localStorage 초기 복원 (API 호출 없음, 토큰 미소진) ──
   useEffect(() => { setSavedTemplates(lsGet(LS_TEMPLATES, [])); setTopCandidates(lsGet(LS_CANDIDATES, [])); }, []);
 
-  // 템플릿 CRUD
-  const saveTemplate = useCallback(name => {
-    if (!confirmedCriteria || !name?.trim()) return;
-    const tpl = { id: Date.now().toString(36), name: name.trim(), job_title: confirmedCriteria.job_title, jobPosting, criteria: confirmedCriteria.criteria, savedAt: new Date().toLocaleDateString("ko-KR") };
-    const next = [tpl, ...savedTemplates.filter(t => t.name !== tpl.name)].slice(0, MAX_TEMPLATES);
-    lsSet(LS_TEMPLATES, next); setSavedTemplates(next); setSaveName(""); setSaveSuccess(true); setTimeout(() => setSaveSuccess(false), 2000);
-  }, [confirmedCriteria, jobPosting, savedTemplates]);
+  // ── 템플릿 자동 저장: "평가 기준 확정" 시 localStorage에 저장 ──
+  const autoSaveTemplate = useCallback((confirmedData, jd) => {
+    const name = confirmedData.job_title || "무제 공고";
+    const tpl = { id: Date.now().toString(36), name, job_title: confirmedData.job_title, jobPosting: jd, criteria: confirmedData.criteria, savedAt: new Date().toLocaleDateString("ko-KR") };
+    const next = [tpl, ...lsGet(LS_TEMPLATES, []).filter(t => t.name !== name)].slice(0, MAX_TEMPLATES);
+    lsSet(LS_TEMPLATES, next); setSavedTemplates(next);
+    console.log(`[localStorage] 템플릿 자동 저장: "${name}" (${confirmedData.criteria.length}개 기준)`);
+  }, []);
 
   const deleteTemplate = useCallback(id => { const next = savedTemplates.filter(t => t.id !== id); lsSet(LS_TEMPLATES, next); setSavedTemplates(next); }, [savedTemplates]);
 
+  // ── 모달 액션: 저장된 공고 불러오기 (API 호출 없음, 토큰 미소진) ──
   const jumpToScreen = useCallback(tpl => {
     setJobPosting(tpl.jobPosting || ""); const r = { job_title: tpl.job_title, criteria: tpl.criteria };
     setCriteria(r); setConfirmedCriteria(r); setFiles([]); setResults([]); setStep(2); setError(""); setSidebarOpen(false);
   }, []);
-
   const jumpToEdit = useCallback(tpl => {
     setJobPosting(tpl.jobPosting || ""); const r = { job_title: tpl.job_title, criteria: tpl.criteria };
     setCriteria(r); setConfirmedCriteria(null); setStep(1); setError(""); setSidebarOpen(false);
   }, []);
 
-  // 추천 순위
+  // ── 추천 순위 ──
   const saveTopCandidates = useCallback(next => { setTopCandidates(next); lsSet(LS_CANDIDATES, next); }, []);
   const setAsTopCandidate = useCallback((candidate, rank) => {
     const entry = { ...candidate, rank, _id: Date.now().toString(36), _savedAt: new Date().toLocaleDateString("ko-KR"), _jobTitle: confirmedCriteria?.job_title || "" };
@@ -339,30 +338,36 @@ export default function AIScreeningTool() {
   const removeTopCandidate = useCallback(rank => saveTopCandidates(topCandidates.filter(t => t.rank !== rank)), [topCandidates, saveTopCandidates]);
   const swapTopCandidates = useCallback(() => { if (topCandidates.length < 2) return; saveTopCandidates(topCandidates.map(t => ({...t, rank: t.rank===1?2:t.rank===2?1:t.rank})).sort((a,b)=>a.rank-b.rank)); }, [topCandidates, saveTopCandidates]);
 
-  // 타이머
+  // ── 타이머 ──
   const startTimer = useCallback(() => { setElapsed(0); if (timerRef.current) clearInterval(timerRef.current); timerRef.current = setInterval(() => setElapsed(p => p + 1), 1000); }, []);
   const stopTimer = useCallback(() => { if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; } }, []);
   useEffect(() => () => stopTimer(), [stopTimer]);
 
-  // URL 가져오기
+  // ── URL 가져오기 (API 호출 O — 토큰 소진) ──
   const fetchJobPosting = useCallback(async () => {
     if (!jobUrl.trim()) return; setFetchingUrl(true); setError("");
     try { const r = await callClaudeWithTools([{role:"user",content:`다음 URL의 채용 공고 내용을 검색해서 추출해 주세요: ${jobUrl}`}],[{type:"web_search_20250305",name:"web_search"}],SYS_URL_FETCH,MODEL_FAST); if (r?.trim()) { setJobPosting(r.trim()); setJobUrl(""); } else setError("공고 내용을 가져오지 못했습니다."); }
     catch (e) { setError(classifyError(e)); } finally { setFetchingUrl(false); }
   }, [jobUrl]);
 
-  // 평가 기준 생성
+  // ── 평가 기준 생성 (API 호출 O — 토큰 소진) ──
   const generateCriteria = useCallback(async () => {
     if (!jobPosting.trim()) return; setLoading(true); setError(""); setLoadingMsg("채용 공고를 분석하고 있습니다..."); startTimer();
     try { const raw = await callClaude([{role:"user",content:`다음 채용 공고를 분석하세요:\n\n${jobPosting}`}],SYS_CRITERIA,MODEL_SMART); const p = extractJSON(raw); if (!p?.criteria) throw new Error("평가 기준 추출 실패"); setCriteria(p); setStep(1); }
     catch (e) { setError("기준 생성 실패: " + classifyError(e)); } finally { stopTimer(); setLoading(false); }
   }, [jobPosting, startTimer, stopTimer]);
 
-  const handleConfirmCriteria = useCallback(f => { setConfirmedCriteria(f); setSaveName(f.job_title || ""); setStep(2); }, []);
+  // ── 🔧 평가 기준 확정 → 자동 저장 + 다음 단계 ──
+  const handleConfirmCriteria = useCallback(f => {
+    setConfirmedCriteria(f);
+    autoSaveTemplate(f, jobPosting); // ← 확정 시 자동 저장
+    setStep(2);
+  }, [jobPosting, autoSaveTemplate]);
+
   const handleFiles = e => setFiles(prev => [...prev, ...Array.from(e.target.files).filter(f => f.type === "application/pdf")]);
   const removeFile = idx => setFiles(prev => prev.filter((_, i) => i !== idx));
 
-  // 스크리닝
+  // ── 스크리닝 (API 호출 O — 토큰 소진) ──
   const screenResumes = useCallback(async () => {
     const c = confirmedCriteria; if (!files.length || !c) return;
     setLoading(true); setError(""); setStep(3); startTimer();
@@ -386,7 +391,7 @@ export default function AIScreeningTool() {
     catch (e) { setError("스크리닝 오류: " + classifyError(e)); } finally { stopTimer(); setLoading(false); }
   }, [files, confirmedCriteria, startTimer, stopTimer]);
 
-  const resetAll = () => { setStep(0); setCriteria(null); setConfirmedCriteria(null); setFiles([]); setResults([]); setError(""); setJobPosting(""); setJobUrl(""); setSaveName(""); setSaveSuccess(false); };
+  const resetAll = () => { setStep(0); setCriteria(null); setConfirmedCriteria(null); setFiles([]); setResults([]); setError(""); setJobPosting(""); setJobUrl(""); };
   const handleCopy = async () => { await copyResults(results); setCopyDone(true); setTimeout(() => setCopyDone(false), 2000); };
 
   // ═══════════════════════════════════════════════════════════
@@ -415,7 +420,6 @@ export default function AIScreeningTool() {
         </div>
 
         <div style={{padding:"25px 40px",maxWidth:1100,margin:"0 auto"}}>
-          {/* 로딩 */}
           {loading && (<div style={{textAlign:"center",padding:"70px 20px"}}>
             <div style={{width:56,height:56,border:"3px solid var(--surface2)",borderTopColor:"var(--accent)",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 22px"}}/>
             <p style={{fontSize:18,color:"var(--text)",fontWeight:500,fontFamily:F}}>{loadingMsg}</p>
@@ -423,7 +427,6 @@ export default function AIScreeningTool() {
             <button onClick={() => {stopTimer();setLoading(false);setStep(p=>p===3?2:p);setError("취소됨");}} style={{marginTop:20,padding:"10px 24px",borderRadius:10,border:"1px solid var(--border)",background:"transparent",color:"var(--text2)",fontSize:15,cursor:"pointer",fontFamily:F}}>취소</button>
           </div>)}
 
-          {/* 에러 */}
           {error && (<div className="fade-in" style={{padding:"16px 20px",borderRadius:12,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",marginBottom:18,display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
             <pre style={{fontSize:14,color:"#f87171",margin:0,lineHeight:1.5,whiteSpace:"pre-wrap",wordBreak:"break-word",fontFamily:F,flex:1}}>{error}</pre>
             <button onClick={() => setError("")} style={{background:"none",border:"none",color:"#f87171",cursor:"pointer",fontSize:18,padding:0,flexShrink:0}}>×</button>
@@ -453,15 +456,8 @@ export default function AIScreeningTool() {
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}><h2 style={{fontSize:20,fontWeight:600,margin:0,fontFamily:F}}>이력서 업로드</h2><RecBadge rec="PASS"/></div>
             <p style={{fontSize:15,color:"var(--text2)",marginBottom:10,lineHeight:1.5,fontFamily:F}}><strong style={{color:"var(--text)"}}>{confirmedCriteria?.job_title}</strong> — PDF를 업로드하면 확정 기준으로 스크리닝합니다.</p>
             <div style={{padding:"14px 18px",borderRadius:12,background:"var(--surface)",border:"1px solid var(--border)",marginBottom:18}}>
-              <p style={{fontSize:13,color:"var(--text3)",fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",margin:"0 0 8px",fontFamily:F}}>확정된 평가 기준 ({confirmedCriteria?.criteria.length}개)</p>
+              <p style={{fontSize:13,color:"var(--text3)",fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em",margin:"0 0 8px",fontFamily:F}}>확정된 평가 기준 ({confirmedCriteria?.criteria.length}개) — 자동 저장됨 ✓</p>
               <div style={{display:"flex",flexWrap:"wrap",gap:7}}>{confirmedCriteria?.criteria.map(c => <span key={c.id} style={{fontSize:14,padding:"4px 12px",borderRadius:7,background:"var(--surface2)",color:"var(--text2)",border:"1px solid var(--border)",fontFamily:F}}>{c.name}</span>)}</div>
-            </div>
-            <div style={{display:"flex",gap:10,marginBottom:18}}>
-              <div style={{flex:1,display:"flex",alignItems:"center",borderRadius:10,border:"1px solid var(--border)",background:"var(--surface)",overflow:"hidden"}}>
-                <span style={{padding:"0 0 0 14px",fontSize:15,color:"var(--text3)"}}>💾</span>
-                <input value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="저장할 이름" style={{flex:1,padding:"12px 14px",border:"none",background:"transparent",color:"var(--text)",fontSize:15,outline:"none",fontFamily:F}} onKeyDown={e => {if(e.key==="Enter"&&saveName.trim()) saveTemplate(saveName);}}/>
-              </div>
-              <button onClick={() => saveTemplate(saveName)} disabled={!saveName.trim()} style={{padding:"12px 18px",borderRadius:10,border:"1px solid var(--border)",background:saveSuccess?"rgba(34,197,94,0.12)":(saveName.trim()?"var(--surface2)":"var(--surface)"),color:saveSuccess?"var(--green)":(saveName.trim()?"var(--text)":"var(--text3)"),fontSize:15,fontWeight:600,cursor:saveName.trim()?"pointer":"not-allowed",fontFamily:F}}>{saveSuccess?"✓ 저장됨":"저장"}</button>
             </div>
             <div onClick={() => fileRef.current?.click()} style={{border:"2px dashed var(--border)",borderRadius:14,padding:"45px 20px",textAlign:"center",cursor:"pointer",background:"var(--surface)"}}
               onDragOver={e => {e.preventDefault();e.currentTarget.style.borderColor="var(--accent)";}} onDragLeave={e => {e.currentTarget.style.borderColor="var(--border)";}}
@@ -477,13 +473,6 @@ export default function AIScreeningTool() {
                 <span style={{fontSize:13,color:f.size>30*1024*1024?"var(--red)":"var(--text3)",fontFamily:F,marginRight:10,flexShrink:0}}>{f.size>1024*1024?(f.size/1024/1024).toFixed(1)+"MB":Math.round(f.size/1024)+"KB"}</span>
                 <button onClick={() => removeFile(i)} style={{background:"none",border:"none",color:"var(--text3)",cursor:"pointer",fontSize:18,padding:"0 4px"}}>×</button>
               </div>)}
-            </div>}
-            {topCandidates.length>0 && <div style={{marginTop:22,padding:"16px 18px",borderRadius:12,background:"linear-gradient(135deg,rgba(99,102,241,0.05),rgba(168,85,247,0.05))",border:"1px solid rgba(99,102,241,0.15)"}}>
-              <p style={{fontSize:13,color:"var(--accent2)",fontWeight:600,margin:"0 0 10px",textTransform:"uppercase",letterSpacing:"0.05em",fontFamily:F}}>🏆 현재 추천 순위</p>
-              <div style={{display:"flex",gap:10}}>{topCandidates.map(pick => <div key={pick.rank} style={{flex:1,padding:"12px 14px",borderRadius:9,background:"var(--surface)",border:"1px solid var(--border)"}}>
-                <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}><span style={{fontSize:12,fontWeight:700,padding:"2px 7px",borderRadius:5,background:pick.rank===1?"rgba(34,197,94,0.12)":"rgba(99,102,241,0.12)",color:pick.rank===1?"var(--green)":"var(--accent2)",fontFamily:F}}>{pick.rank}순위</span><span style={{fontSize:14,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontFamily:F}}>{pick.candidate_name}</span></div>
-                <p style={{fontSize:13,color:"var(--text3)",margin:0,fontFamily:F}}>{pick._jobTitle}</p>
-              </div>)}</div>
             </div>}
             <div style={{display:"flex",gap:12,marginTop:14}}>
               <button onClick={() => setStep(1)} style={{padding:"16px 28px",borderRadius:12,border:"1px solid var(--border)",background:"transparent",color:"var(--text2)",fontSize:17,cursor:"pointer",fontFamily:F}}>← 기준 수정</button>
