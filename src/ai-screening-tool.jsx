@@ -4,6 +4,12 @@ const API_URL = "https://ai-screener-api.qkrcksgud91.workers.dev";
 const MODEL_SMART = "claude-sonnet-4-6";
 const MODEL_FAST = "claude-haiku-4-5-20251001";
 
+// ─────────────────────────────────────────────
+// [추가] localStorage에서 사용할 키 상수
+// ─────────────────────────────────────────────
+const LS_KEY_JD = "saved_jd";
+const LS_KEY_CRITERIA = "saved_criteria";
+
 const SYS_CRITERIA = `당신은 세계 최고의 HR 전문가이자 직무 분석가입니다. 
 채용 공고(JD)를 분석하여 서류 스크리닝에 사용할 핵심 평가 기준 3~5가지를 생성하십시오.
 반드시 아래 JSON 형식으로만 응답하십시오. (가중치 개념은 완전히 삭제)
@@ -303,6 +309,33 @@ export default function AIScreeningTool() {
   const timerRef = useRef(null);
   const fileRef = useRef();
 
+  // ─────────────────────────────────────────────
+  // [추가] localStorage에서 불러온 마지막 JD/기준 상태
+  // null이면 저장된 데이터 없음 → 불러오기 카드 미표시
+  // ─────────────────────────────────────────────
+  const [lastSavedData, setLastSavedData] = useState(null);
+
+  // ─────────────────────────────────────────────
+  // [추가] 앱 최초 마운트 시: localStorage 확인
+  // saved_jd, saved_criteria 둘 다 있을 때만 카드 표시
+  // ─────────────────────────────────────────────
+  useEffect(() => {
+    try {
+      const savedJD = localStorage.getItem(LS_KEY_JD);
+      const savedCriteria = localStorage.getItem(LS_KEY_CRITERIA);
+      if (savedJD && savedCriteria) {
+        const parsedCriteria = JSON.parse(savedCriteria);
+        // 유효성 검사: criteria 배열이 있어야 함
+        if (parsedCriteria?.criteria?.length > 0) {
+          setLastSavedData({ jd: savedJD, criteria: parsedCriteria });
+        }
+      }
+    } catch {
+      // localStorage 읽기 실패 시 조용히 무시
+    }
+  }, []);
+
+  // 기존 window.storage 로직 (savedTemplates, topCandidates)
   useEffect(() => {
     (async () => {
       try { const res = await window.storage.get("screening-templates"); if (res?.value) setSavedTemplates(JSON.parse(res.value)); } catch {}
@@ -371,7 +404,7 @@ export default function AIScreeningTool() {
       const result = await callClaudeWithTools(
       [{ role: "user", content: `다음 URL의 채용 공고 내용을 검색해서 추출해 주세요: ${jobUrl}` }],
       [{ type: "web_search_20250305", name: "web_search" }],
-      SYS_URL_FETCH, MODEL_FAST    // ← MODEL_SMART → MODEL_FAST
+      SYS_URL_FETCH, MODEL_FAST
       );
       if (result?.trim()) { setJobPosting(result.trim()); setJobUrl(""); }
       else { setError("공고 내용을 가져오지 못했습니다."); }
@@ -391,8 +424,65 @@ export default function AIScreeningTool() {
     finally { stopTimer(); setLoading(false); }
   }, [jobPosting, startTimer, stopTimer]);
 
+  // ─────────────────────────────────────────────
+  // [수정] 평가 기준 확정 시 localStorage에 자동 저장
+  // saved_jd  : 현재 입력된 채용 공고 텍스트
+  // saved_criteria : 확정된 평가 기준 객체 (JSON)
+  // ─────────────────────────────────────────────
   const handleConfirmCriteria = useCallback((final_) => {
-    setConfirmedCriteria(final_); setSaveName(final_.job_title || ""); setStep(2);
+    setConfirmedCriteria(final_);
+    setSaveName(final_.job_title || "");
+    setStep(2);
+
+    // localStorage 저장
+    try {
+      localStorage.setItem(LS_KEY_JD, jobPosting);
+      localStorage.setItem(LS_KEY_CRITERIA, JSON.stringify(final_));
+      // 불러오기 카드 상태도 최신화
+      setLastSavedData({ jd: jobPosting, criteria: final_ });
+    } catch {
+      // 저장 실패 시 조용히 무시 (핵심 기능에 영향 없음)
+    }
+  }, [jobPosting]);
+
+  // ─────────────────────────────────────────────
+  // [추가] 불러오기 카드 — 버튼 핸들러 3종
+  // ─────────────────────────────────────────────
+
+  // 버튼 1: 저장된 기준으로 바로 Step 2(이력서 업로드)로 이동
+  const handleLoadAndSkip = useCallback(() => {
+    if (!lastSavedData) return;
+    setJobPosting(lastSavedData.jd);
+    setCriteria(lastSavedData.criteria);
+    setConfirmedCriteria(lastSavedData.criteria);
+    setSaveName(lastSavedData.criteria.job_title || "");
+    setError("");
+    setStep(2); // Step 2 = 이력서 업로드 화면
+  }, [lastSavedData]);
+
+  // 버튼 2: 저장된 기준을 불러와 Step 1(평가 기준 수정)으로 이동
+  const handleLoadAndEdit = useCallback(() => {
+    if (!lastSavedData) return;
+    setJobPosting(lastSavedData.jd);
+    setCriteria(lastSavedData.criteria);
+    setConfirmedCriteria(lastSavedData.criteria);
+    setError("");
+    setStep(1); // Step 1 = 평가 기준 편집 화면
+  }, [lastSavedData]);
+
+  // 버튼 3: localStorage 초기화 후 빈 Step 0(공고 입력)으로 이동
+  const handleClearAndReset = useCallback(() => {
+    try {
+      localStorage.removeItem(LS_KEY_JD);
+      localStorage.removeItem(LS_KEY_CRITERIA);
+    } catch {}
+    setLastSavedData(null); // 카드 숨김
+    setJobPosting("");
+    setJobUrl("");
+    setCriteria(null);
+    setConfirmedCriteria(null);
+    setError("");
+    setStep(0);
   }, []);
 
   const handleFiles = (e) => setFiles((prev) => [...prev, ...Array.from(e.target.files).filter((f) => f.type === "application/pdf")]);
@@ -529,6 +619,112 @@ export default function AIScreeningTool() {
         {/* STEP 0 */}
         {step === 0 && !loading && (
           <div>
+
+            {/* ─────────────────────────────────────────────
+                [추가] 불러오기 카드
+                localStorage에 저장된 데이터가 있을 때만 표시됨
+                ───────────────────────────────────────────── */}
+            {lastSavedData && (
+              <div style={{
+                marginBottom: 30,
+                padding: "22px 25px",
+                borderRadius: 16,
+                border: "1px solid rgba(99,102,241,0.4)",
+                background: "linear-gradient(135deg, rgba(99,102,241,0.07), rgba(168,85,247,0.07))",
+              }}>
+                {/* 카드 제목 + 공고 미리보기 */}
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 13, marginBottom: 18 }}>
+                  <div style={{ width: 40, height: 40, borderRadius: 11, background: "linear-gradient(135deg, var(--accent), #a78bfa)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 19, flexShrink: 0 }}>
+                    💾
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ fontSize: 13, color: "var(--accent2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", margin: "0 0 4px", fontFamily: FONT }}>
+                      최근 사용한 평가 기준
+                    </p>
+                    {/* 직무명 */}
+                    <p style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", margin: "0 0 4px", fontFamily: FONT }}>
+                      {lastSavedData.criteria.job_title || "저장된 공고"}
+                    </p>
+                    {/* 평가 기준 개수 + JD 앞부분 미리보기 */}
+                    <p style={{ fontSize: 14, color: "var(--text3)", margin: 0, fontFamily: FONT }}>
+                      평가 기준 {lastSavedData.criteria.criteria.length}개
+                      {lastSavedData.criteria.criteria.slice(0, 3).map((c) => ` · ${c.name}`).join("")}
+                      {lastSavedData.criteria.criteria.length > 3 ? " …" : ""}
+                    </p>
+                    {/* JD 앞부분 미리보기 (최대 80자) */}
+                    {lastSavedData.jd && (
+                      <p style={{ fontSize: 13, color: "var(--text3)", margin: "6px 0 0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: FONT }}>
+                        📄 {lastSavedData.jd.slice(0, 80)}{lastSavedData.jd.length > 80 ? "…" : ""}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* 버튼 3종 */}
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  {/* 버튼 1: 바로 스크리닝 시작 (Step 1, 2 건너뜀) */}
+                  <button
+                    onClick={handleLoadAndSkip}
+                    style={{
+                      flex: "1 1 180px",
+                      padding: "13px 18px",
+                      borderRadius: 11,
+                      border: "none",
+                      background: "linear-gradient(135deg, var(--accent), #7c3aed)",
+                      color: "#fff",
+                      fontSize: 15,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      fontFamily: FONT,
+                      letterSpacing: "-0.01em",
+                    }}
+                  >
+                    ⚡ 이 기준으로 바로 스크리닝
+                  </button>
+
+                  {/* 버튼 2: 평가 기준 수정 후 Step 1로 이동 */}
+                  <button
+                    onClick={handleLoadAndEdit}
+                    style={{
+                      flex: "1 1 140px",
+                      padding: "13px 18px",
+                      borderRadius: 11,
+                      border: "1px solid rgba(99,102,241,0.4)",
+                      background: "rgba(99,102,241,0.08)",
+                      color: "var(--accent2)",
+                      fontSize: 15,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      fontFamily: FONT,
+                    }}
+                  >
+                    ✏️ 평가 기준 수정하기
+                  </button>
+
+                  {/* 버튼 3: localStorage 초기화 후 새로 시작 */}
+                  <button
+                    onClick={handleClearAndReset}
+                    style={{
+                      flex: "1 1 140px",
+                      padding: "13px 18px",
+                      borderRadius: 11,
+                      border: "1px solid var(--border)",
+                      background: "transparent",
+                      color: "var(--text3)",
+                      fontSize: 15,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      fontFamily: FONT,
+                    }}
+                  >
+                    🗑 새로운 공고 등록
+                  </button>
+                </div>
+              </div>
+            )}
+            {/* ─── 불러오기 카드 끝 ─── */}
+
+            {/* 기존 저장된 공고(savedTemplates) 목록 */}
             {savedTemplates.length > 0 && (
               <div style={{ marginBottom: 30 }}>
                 <p style={{ fontSize: 15, color: "var(--text3)", fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 13, fontFamily: FONT }}>
