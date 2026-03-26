@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 const API_URL = "https://ai-screener-api.qkrcksgud91.workers.dev";
-const MODEL_SMART = "claude-sonnet-4-6";
+const MODEL_SMART = "claude-sonnet-4-6";    // 옵션 B          // 옵션 A
 const MODEL_FAST = "claude-haiku-4-5-20251001";
 
 // ─────────────────────────────────────────────
