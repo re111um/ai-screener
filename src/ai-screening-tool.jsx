@@ -369,9 +369,9 @@ export default function AIScreeningTool() {
     setFetchingUrl(true); setError("");
     try {
       const result = await callClaudeWithTools(
-        [{ role: "user", content: `다음 URL의 채용 공고 내용을 검색해서 추출해 주세요: ${jobUrl}` }],
-        [{ type: "web_search_20250305", name: "web_search" }],
-        SYS_URL_FETCH, MODEL_SMART
+      [{ role: "user", content: `다음 URL의 채용 공고 내용을 검색해서 추출해 주세요: ${jobUrl}` }],
+      [{ type: "web_search_20250305", name: "web_search" }],
+      SYS_URL_FETCH, MODEL_FAST    // ← MODEL_SMART → MODEL_FAST
       );
       if (result?.trim()) { setJobPosting(result.trim()); setJobUrl(""); }
       else { setError("공고 내용을 가져오지 못했습니다."); }
