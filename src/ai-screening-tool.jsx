@@ -88,12 +88,30 @@ function sortByDateDesc(candidates) {
 }
 
 // ── API ─────────────────────────────────────────────────────
-async function callAPI(payload) {
+async function callAPI(payload, retries = 1) {
   console.log(`[callAPI] 모델:${payload.model}`);
   let res;
-  try { res = await fetch(API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); }
-  catch (e) { throw new Error(`[네트워크] ${e.message}`); }
-  if (!res.ok) { const b = await res.text().catch(() => ""); try { const p = JSON.parse(b); throw new Error(`API ${res.status} [${p.stage||""}]: ${p.error||b.slice(0,400)}`); } catch (pe) { if (pe.message.startsWith("API ")) throw pe; throw new Error(`API ${res.status}: ${b.slice(0,400)}`); } }
+  try { 
+    res = await fetch(API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); 
+  } catch (e) { 
+    if (retries > 0) {
+      console.log(`[callAPI] 네트워크 오류, 1초 후 재시도...`);
+      await new Promise(r => setTimeout(r, 1000));
+      return callAPI(payload, retries - 1);
+    }
+    throw new Error(`[네트워크] ${e.message}`); 
+  }
+  if (!res.ok) { 
+    // 콜드 스타트로 인한 503/502 에러 시 재시도
+    if ((res.status === 503 || res.status === 502) && retries > 0) {
+      console.log(`[callAPI] ${res.status} 에러, 1초 후 재시도...`);
+      await new Promise(r => setTimeout(r, 1000));
+      return callAPI(payload, retries - 1);
+    }
+    const b = await res.text().catch(() => ""); 
+    try { const p = JSON.parse(b); throw new Error(`API ${res.status} [${p.stage||""}]: ${p.error||b.slice(0,400)}`); } 
+    catch (pe) { if (pe.message.startsWith("API ")) throw pe; throw new Error(`API ${res.status}: ${b.slice(0,400)}`); } 
+  }
   const data = await res.json();
   const text = (data.content||[]).map(b=>b.text||"").join("");
   if (!text.trim()) throw new Error(`빈 응답 (${data.stop_reason||"unknown"})`);
