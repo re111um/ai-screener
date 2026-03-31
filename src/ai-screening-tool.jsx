@@ -228,8 +228,9 @@ export default function AIScreeningTool() {
   const [modalTemplate,setModalTemplate]=useState(null);
   const [copyDone,setCopyDone]=useState(false);
   const [mergedPrev,setMergedPrev]=useState(false);
-  const timerRef=useRef(null);
-  const fileRef=useRef();
+  const timerRef = useRef(null);
+  const fileRef = useRef();
+  const abortRef = useRef(null);
 
   useEffect(()=>{setSavedTemplates(lsGet(LS_TEMPLATES,[]));setSavedResults(lsGet(LS_RESULTS,[]));},[]); 
 
