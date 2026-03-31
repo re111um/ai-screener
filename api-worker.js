@@ -82,7 +82,7 @@ async function handleApiRequest(request, env) {
   if (payload.system) body.system = payload.system;
   if (payload.tools?.length) body.tools = payload.tools;
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+ for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const apiRes = await fetch(ANTHROPIC_API, {
         method: "POST",
@@ -96,7 +96,7 @@ async function handleApiRequest(request, env) {
       const responseText = await apiRes.text();
 
       // 콜드 스타트로 인한 403/429 → 1.5초 후 재시도
-      if ((apiRes.status === 403 || apiRes.status === 429) && attempt < 2) {
+      if ((apiRes.status === 403 || apiRes.status === 429) && attempt < 3) {
         await new Promise(r => setTimeout(r, 1500));
         continue;
       }
