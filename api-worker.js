@@ -8,7 +8,7 @@
 
 const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 5;
 
 export default {
   async fetch(request, env) {
