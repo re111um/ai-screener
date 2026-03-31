@@ -9,6 +9,10 @@ const MAX_TEMPLATES = 20;
 
 const SYS_CRITERIA = `당신은 세계 최고의 HR 전문가이자 직무 분석가입니다. 
 채용 공고(JD)를 분석하여 서류 스크리닝에 사용할 핵심 평가 기준 3~5가지를 생성하십시오.
+각 기준에 importance 값을 반드시 지정하십시오:
+- "required": 이 기준을 충족하지 못하면 채용이 불가능한 필수 역량
+- "preferred": 충족하면 유리하지만 필수는 아닌 우대 역량
+
 반드시 아래 JSON 형식으로만 응답하십시오.
 {
   "job_title": "직무명",
@@ -16,7 +20,8 @@ const SYS_CRITERIA = `당신은 세계 최고의 HR 전문가이자 직무 분�
     {
       "id": 1,
       "name": "평가 기준명 (예: Python 백엔드 개발 역량)",
-      "description": "이력서에서 확인해야 할 구체적인 지표나 키워드"
+      "description": "이력서에서 확인해야 할 구체적인 지표나 키워드",
+      "importance": "required"
     }
   ]
 }`;
@@ -44,7 +49,11 @@ const SYS_SCREENING = `당신은 냉철하고 객관적인 AI 면접관입니다
 [엄격한 평가 가이드라인]
 1. status: "충족", "미충족", "판단 불가" 중 하나만 작성하십시오.
 2. reason: 반드시 "1. ~임. 2. ~함." 과 같이 번호를 매기고 개조식으로 작성하십시오.
-3. recommendation: 평가를 종합하여 "PASS", "MAYBE", "FAIL" 중 하나를 기재하십시오.
+3. recommendation: 아래 규칙을 순서대로 적용하여 "SUPERB", "RECOMMEND", "MAYBE", "FAIL" 중 하나를 기재하십시오.
+   - FAIL: "required(필수)" 기준 중 하나라도 "미충족"인 경우 → 무조건 FAIL
+   - MAYBE: "required(필수)" 기준 중 "판단 불가"가 하나라도 있는 경우 (이력서에서 확인할 수 없는 경우)
+   - SUPERB: 모든 "required(필수)" 기준이 "충족"이고, "preferred(우대)" 기준도 1개 이상 "충족"인 경우
+   - RECOMMEND: 모든 "required(필수)" 기준이 "충족"이지만 위 SUPERB 조건에 해당하지 않는 경우
 4. total_experience: 이력서에서 첫 직장 시작일~현재까지의 기간을 추정하여 "전체 경력 N년" 형태로 기재하십시오.
 5. relevant_experience: 이력서에서 제공된 직무(JD)와 직접 관련 있는 경력만 합산하여 "JD 관련 실 경력 M년" 형태로 기재하십시오.`;
 
@@ -100,7 +109,7 @@ function friendlyError(e) {
 function sortByDateDesc(candidates) {
   return [...candidates].sort((a, b) => {
     const da = a._screenedAt || ""; const db = b._screenedAt || "";
-    if (da === db) { const ord = { PASS: 0, MAYBE: 1, FAIL: 2 }; return (ord[a.recommendation] ?? 3) - (ord[b.recommendation] ?? 3); }
+    if (da === db) { const ord = { SUPERB: 0, RECOMMEND: 1, MAYBE: 2, FAIL: 3 }; return (ord[a.recommendation] ?? 4) - (ord[b.recommendation] ?? 4); }
     return db.localeCompare(da);
   });
 }
@@ -241,7 +250,8 @@ const inputBase = { width: "100%", padding: "13px 15px", borderRadius: 10, borde
 
 // ── 작은 UI ─────────────────────────────────────────────────
 const StatusBadge = ({ status }) => { const map = { "충족": { bg: "rgba(34,197,94,0.12)", color: "#22c55e", border: "rgba(34,197,94,0.25)", icon: "✓" }, "미충족": { bg: "rgba(239,68,68,0.10)", color: "#ef4444", border: "rgba(239,68,68,0.2)", icon: "✗" }, "판단 불가": { bg: "rgba(245,158,11,0.10)", color: "#f59e0b", border: "rgba(245,158,11,0.2)", icon: "?" } }; const c = map[status] || map["판단 불가"]; return <span style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 12px", borderRadius: 20, fontSize: 13, fontWeight: 600, background: c.bg, color: c.color, border: `1px solid ${c.border}`, fontFamily: F }}><span style={{ fontSize: 13 }}>{c.icon}</span>{status}</span>; };
-const RecBadge = ({ rec }) => { const colors = { PASS: { bg: "rgba(34,197,94,0.12)", color: "#22c55e", border: "rgba(34,197,94,0.25)" }, FAIL: { bg: "rgba(239,68,68,0.10)", color: "#ef4444", border: "rgba(239,68,68,0.2)" }, MAYBE: { bg: "rgba(245,158,11,0.10)", color: "#f59e0b", border: "rgba(245,158,11,0.2)" } }; const label = { PASS: "통과 추천", FAIL: "탈락", MAYBE: "검토 필요" }; const c = colors[rec] || colors.MAYBE; return <span style={{ display: "inline-block", padding: "4px 12px", borderRadius: 20, fontSize: 13, fontWeight: 600, background: c.bg, color: c.color, border: `1px solid ${c.border}`, fontFamily: F }}>{label[rec] || rec}</span>; };
+const RecBadge = ({ rec }) => { const colors = { SUPERB: { bg: "rgba(99,102,241,0.12)", color: "#818cf8", border: "rgba(99,102,241,0.25)" }, RECOMMEND: { bg: "rgba(34,197,94,0.12)", color: "#22c55e", border: "rgba(34,197,94,0.25)" }, MAYBE: { bg: "rgba(245,158,11,0.10)", color: "#f59e0b", border: "rgba(245,158,11,0.2)" }, FAIL: { bg: "rgba(239,68,68,0.10)", color: "#ef4444", border: "rgba(239,68,68,0.2)" } }; const label = { SUPERB: "강력 추천", RECOMMEND: "면접 추천", MAYBE: "검토 필요", FAIL: "부적합" }; 
+                               const c = colors[rec] || colors.MAYBE; return <span style={{ display: "inline-block", padding: "4px 12px", borderRadius: 20, fontSize: 13, fontWeight: 600, background: c.bg, color: c.color, border: `1px solid ${c.border}`, fontFamily: F }}>{label[rec] || rec}</span>; };
 
 // ── 🆕 에러 배너 (다시 시도 버튼 포함) ─────────────────────
 function ErrorBanner({ error, onDismiss, onRetry }) {
@@ -282,7 +292,7 @@ function Sidebar({ templates, onSelectTemplate, onDeleteTemplate, historyList, o
       <div style={{ padding: "16px 16px 12px" }}><p style={{ fontSize: 13, fontWeight: 600, color: "#f59e0b", margin: 0, textTransform: "uppercase", letterSpacing: "0.06em" }}>스크리닝 히스토리 · {historyList.length}</p></div>
       <div style={{ flex: 1, overflowY: "auto", padding: "0 12px 12px" }}>
         {historyList.length === 0 && <p style={{ fontSize: 13, color: "var(--text3)", textAlign: "center", margin: "20px 0" }}>스크리닝 결과가 자동 저장됩니다</p>}
-        {historyList.map(h => { const pc = h.candidates.filter(c => c.recommendation === "PASS").length; const fc = h.candidates.filter(c => c.recommendation === "FAIL").length; return <div key={h.id} onClick={() => onSelectHistory(h)} style={{ padding: "12px 14px", marginBottom: 6, borderRadius: 9, background: "var(--surface2)", border: "1px solid var(--border)", cursor: "pointer", transition: "border-color 0.15s" }} onMouseEnter={e => e.currentTarget.style.borderColor = "var(--amber)"} onMouseLeave={e => e.currentTarget.style.borderColor = "var(--border)"}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}><div style={{ flex: 1, minWidth: 0 }}><p style={{ fontSize: 14, fontWeight: 600, margin: 0, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.job_title}</p><p style={{ fontSize: 12, color: "var(--text3)", margin: "3px 0 0" }}>{h.candidates.length}명 · <span style={{ color: "var(--green)" }}>{pc} pass</span> · <span style={{ color: "var(--red)" }}>{fc} fail</span></p><p style={{ fontSize: 11, color: "var(--text3)", margin: "2px 0 0" }}>{h.updatedAt}</p></div><button onClick={e => { e.stopPropagation(); onDeleteHistory(h.id); }} style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>×</button></div></div>; })}
+        {historyList.map(h => { const pc = h.candidates.filter(c => c.recommendation === "SUPERB" || c.recommendation === "RECOMMEND").length; const fc = h.candidates.filter(c => c.recommendation === "FAIL").length; return <div key={h.id} onClick={() => onSelectHistory(h)} style={{ padding: "12px 14px", marginBottom: 6, borderRadius: 9, background: "var(--surface2)", border: "1px solid var(--border)", cursor: "pointer", transition: "border-color 0.15s" }} onMouseEnter={e => e.currentTarget.style.borderColor = "var(--amber)"} onMouseLeave={e => e.currentTarget.style.borderColor = "var(--border)"}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}><div style={{ flex: 1, minWidth: 0 }}><p style={{ fontSize: 14, fontWeight: 600, margin: 0, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.job_title}</p><p style={{ fontSize: 12, color: "var(--text3)", margin: "3px 0 0" }}>{h.candidates.length}명 · <span style={{ color: "var(--green)" }}>{pc} pass</span> · <span style={{ color: "var(--red)" }}>{fc} fail</span></p><p style={{ fontSize: 11, color: "var(--text3)", margin: "2px 0 0" }}>{h.updatedAt}</p></div><button onClick={e => { e.stopPropagation(); onDeleteHistory(h.id); }} style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>×</button></div></div>; })}
       </div>
       <div style={{ padding: "10px 16px", borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--text3)" }}>저장 용량: {(lsUsage() / 1024).toFixed(0)}KB / {(LS_LIMIT / 1024).toFixed(0)}KB</div>
     </div>
@@ -308,13 +318,14 @@ function TemplateModal({ template, onClose, onScreenNow, onEdit }) {
 
 // ── 평가 기준 편집기 ────────────────────────────────────────
 function CriteriaEditor({ initial, onConfirm, onBack }) {
-  const [jobTitle, setJobTitle] = useState(initial.job_title || ""); const [items, setItems] = useState(() => (initial.criteria || []).map((c, i) => ({ id: c.id || i + 1, name: c.name || "", description: c.description || "" }))); const [formError, setFormError] = useState("");
-  const update = (idx, f, v) => setItems(p => p.map((it, i) => i === idx ? { ...it, [f]: v } : it)); const addItem = () => { const mx = items.reduce((m, it) => Math.max(m, it.id), 0); setItems(p => [...p, { id: mx + 1, name: "", description: "" }]); }; const removeItem = idx => { if (items.length <= 1) return; setItems(p => p.filter((_, i) => i !== idx)); };
+  const [jobTitle, setJobTitle] = useState(initial.job_title || ""); const [items, setItems] = useState(() => (initial.criteria || []).map((c, i) => ({ id: c.id || i + 1, name: c.name || "", description: c.description || "", importance: c.importance || "preferred" }))); const [formError, setFormError] = useState("");
+  const update = (idx, f, v) => setItems(p => p.map((it, i) => i === idx ? { ...it, [f]: v } : it)); const addItem = () => { const mx = items.reduce((m, it) => Math.max(m, it.id), 0); setItems(p => [...p, { id: mx + 1, name: "", description: "", importance: "preferred" }]); }; 
+  const removeItem = idx => { if (items.length <= 1) return; setItems(p => p.filter((_, i) => i !== idx)); };
   const handleConfirm = () => { if (!jobTitle.trim()) { setFormError("직무명을 입력하세요."); return; } if (items.some(it => !it.name.trim())) { setFormError("모든 기준의 이름을 입력하세요."); return; } setFormError(""); onConfirm({ job_title: jobTitle, criteria: items }); };
   return <div><h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 15, fontFamily: F }}>평가 기준 편집</h2>
     {formError && <div style={{ padding: "12px 18px", borderRadius: 10, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", marginBottom: 15, color: "#f87171", fontSize: 15, fontFamily: F }}>{formError}</div>}
     <div style={{ marginBottom: 20 }}><label style={{ fontSize: 14, color: "var(--text2)", fontWeight: 500, marginBottom: 6, display: "block", fontFamily: F }}>직무명</label><input value={jobTitle} onChange={e => setJobTitle(e.target.value)} placeholder="예: 백엔드 개발자" style={inputBase} /></div>
-    {items.map((it, idx) => <div key={it.id} style={{ padding: 20, borderRadius: 13, background: "var(--surface)", border: "1px solid var(--border)", marginBottom: 12 }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}><span style={{ fontSize: 14, color: "var(--accent2)", fontWeight: 600, fontFamily: F }}>기준 {idx + 1}</span>{items.length > 1 && <button onClick={() => removeItem(idx)} style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 18 }}>×</button>}</div><input value={it.name} onChange={e => update(idx, "name", e.target.value)} placeholder="기준명" style={{ ...inputBase, marginBottom: 8 }} /><input value={it.description} onChange={e => update(idx, "description", e.target.value)} placeholder="상세 설명" style={inputBase} /></div>)}
+    {items.map((it, idx) => <div key={it.id} style={{ padding: 20, borderRadius: 13, background: "var(--surface)", border: "1px solid var(--border)", marginBottom: 12 }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}><span style={{ fontSize: 14, color: "var(--accent2)", fontWeight: 600, fontFamily: F }}>기준 {idx + 1}</span><div style={{ display: "flex", gap: 4 }}><button onClick={() => update(idx, "importance", "required")} style={{ padding: "3px 10px", borderRadius: 6, border: "1px solid " + (it.importance === "required" ? "var(--red)" : "var(--border)"), background: it.importance === "required" ? "rgba(239,68,68,0.12)" : "transparent", color: it.importance === "required" ? "var(--red)" : "var(--text3)", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: F }}>필수</button><button onClick={() => update(idx, "importance", "preferred")} style={{ padding: "3px 10px", borderRadius: 6, border: "1px solid " + (it.importance !== "required" ? "var(--green)" : "var(--border)"), background: it.importance !== "required" ? "rgba(34,197,94,0.12)" : "transparent", color: it.importance !== "required" ? "var(--green)" : "var(--text3)", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: F }}>우대</button></div>{items.length > 1 && <button onClick={() => removeItem(idx)} style={{ background: "none", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 18 }}>×</button>}</div><input value={it.name} onChange={e => update(idx, "name", e.target.value)} placeholder="기준명" style={{ ...inputBase, marginBottom: 8 }} /><input value={it.description} onChange={e => update(idx, "description", e.target.value)} placeholder="상세 설명" style={inputBase} /></div>)}
     <button onClick={addItem} style={{ width: "100%", padding: "13px", borderRadius: 10, border: "1px dashed var(--border)", background: "transparent", color: "var(--text3)", fontSize: 16, cursor: "pointer", marginBottom: 20, fontFamily: F }}>+ 기준 추가</button>
     <div style={{ display: "flex", gap: 13 }}><button onClick={onBack} style={{ padding: "18px 30px", borderRadius: 13, border: "1px solid var(--border)", background: "transparent", color: "var(--text2)", fontSize: 18, cursor: "pointer", fontFamily: F }}>← 뒤로</button><button onClick={handleConfirm} style={{ flex: 1, padding: "18px", borderRadius: 13, border: "none", background: "linear-gradient(135deg, var(--accent), #7c3aed)", color: "#fff", fontSize: 19, fontWeight: 600, cursor: "pointer", fontFamily: F }}>평가 기준 확정 →</button></div>
   </div>;
@@ -448,7 +459,7 @@ export default function AIScreeningTool() {
     partialResultsRef.current = []; // 🆕 부분 결과 초기화
 
     const MAX_SIZE = 30 * 1024 * 1024, CONCURRENCY = 2;
-    const criteriaCompact = c.criteria.map(cr => `[ID:${cr.id}] ${cr.name}: ${cr.description}`).join("\n");
+    const criteriaCompact = c.criteria.map(cr => `[ID:${cr.id}] [${cr.importance === "required" ? "required(필수)" : "preferred(우대)"}] ${cr.name}: ${cr.description}`).join("\n");
     let done = 0;
 
     const processOne = async file => {
@@ -483,7 +494,7 @@ export default function AIScreeningTool() {
       } catch (e) {
         if (e.name === "AbortError") return null;
         done++; setLoadingMsg(`이력서 분석 중 (${done}/${files.length} 완료)`);
-        const errResult = { candidate_name: file.name.replace(/\.pdf$/i, ""), _fileName: file.name, _screenedAt: todayStr(), summary: "분석 실패", total_experience: "확인 불가", relevant_experience: "확인 불가", evaluations: c.criteria.map(cr => ({ criteria_id: cr.id, status: "판단 불가", reason: "분석 중 오류 발생" })), recommendation: "FAIL", strength: "-", weakness: friendlyError(e).msg, _error: true };
+        const errResult = { candidate_name: file.name.replace(/\.pdf$/i, ""), _fileName: file.name, _screenedAt: todayStr(), summary: "분석 실패", total_experience: "확인 불가", relevant_experience: "확인 불가", evaluations: c.criteria.map(cr => ({ criteria_id: cr.id, status: "판단 불가", reason: "분석 중 오류 발생" })), recommendation: "MAYBE", strength: "-", weakness: friendlyError(e).msg, _error: true };
         partialResultsRef.current.push(errResult);
         return errResult;
       }
@@ -603,7 +614,7 @@ export default function AIScreeningTool() {
 
           {/* STEP 2 */}
           {step === 2 && !loading && <div className="fade-in">
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}><h2 style={{ fontSize: 20, fontWeight: 600, margin: 0, fontFamily: F }}>이력서 업로드</h2><RecBadge rec="PASS" /></div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}><h2 style={{ fontSize: 20, fontWeight: 600, margin: 0, fontFamily: F }}>이력서 업로드</h2><RecBadge rec="SUPERB" /></div>
             <p style={{ fontSize: 15, color: "var(--text2)", marginBottom: 10, lineHeight: 1.5, fontFamily: F }}><strong style={{ color: "var(--text)" }}>{confirmedCriteria?.job_title}</strong> — PDF를 업로드하면 확정 기준으로 스크리닝합니다.</p>
             {/* 🆕 기존 결과가 있으면 안내 */}
             {results.length > 0 && <div style={{ padding: "12px 16px", borderRadius: 10, background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.2)", marginBottom: 14, fontSize: 14, color: "var(--green)", fontFamily: F }}>✓ 기존 {results.length}명 결과 유지 중. 추가 파일을 업로드하면 기존 결과에 합쳐집니다.</div>}
