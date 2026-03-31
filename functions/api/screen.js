@@ -77,27 +77,38 @@ export async function onRequestPost(context) {
   if (payload.tools?.length) body.tools = payload.tools;
 
   // 6. Anthropic API 호출
-  try {
-    const apiRes = await fetch(ANTHROPIC_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify(body),
-    });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const apiRes = await fetch(ANTHROPIC_API, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+      });
+      const responseText = await apiRes.text();
 
-    const responseText = await apiRes.text();
-    return new Response(responseText, {
-      status: apiRes.status,
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch (err) {
-    return Response.json(
-      { error: "Anthropic API 호출 실패: " + err.message, stage: "API 통신" },
-      { status: 502 }
-    );
+      if ((apiRes.status === 403 || apiRes.status === 429) && attempt < 3) {
+        await new Promise(r => setTimeout(r, 1500));
+        continue;
+      }
+
+      return new Response(responseText, {
+        status: apiRes.status,
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (err) {
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, 1500));
+        continue;
+      }
+      return Response.json(
+        { error: "Anthropic API 호출 실패: " + err.message, stage: "API 통신" },
+        { status: 502 }
+      );
+    }
   }
 }
 
