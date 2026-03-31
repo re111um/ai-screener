@@ -75,6 +75,8 @@ function friendlyError(e) {
   const m = e?.message || String(e);
 
   // Worker가 보내는 errorType 기반 분류
+  if (m.includes("CLOUDFLARE_BLOCK"))
+    return { msg: "Cloudflare 보안 정책에 의해 차단되었습니다.", action: "retry", detail: "페이지를 새로고침한 후 다시 시도해 주세요. 반복되면 관리자에게 Cloudflare Security 설정 확인을 요청하세요." };
   if (m.includes("AUTH_ERROR") || m.includes("authentication_error") || m.includes("API 403") || m.includes("API 401"))
     return { msg: "서버 인증에 일시적인 문제가 있습니다.", action: "retry", detail: "잠시 후 다시 시도해 주세요. 반복되면 관리자에게 문의하세요." };
   if (m.includes("RATE_LIMIT") || m.includes("API 429"))
@@ -103,7 +105,7 @@ function sortByDateDesc(candidates) {
   });
 }
 
-// ── API (🆕 403/429 재시도 + 지수 백오프) ───────────────────
+// ── API (403 출처 구분 + 지수 백오프) ────────────────────────
 async function callAPI(payload, retries = 2, signal = null) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     let res;
@@ -123,24 +125,47 @@ async function callAPI(payload, retries = 2, signal = null) {
       throw new Error(`NETWORK_ERROR: ${e.message}`);
     }
 
-    // 🆕 403, 429, 5xx 모두 재시도 대상
-    const retryable = [403, 429, 500, 502, 503, 529];
     if (!res.ok) {
+      const b = await res.text().catch(() => "");
+      const isJSON = b.trim().startsWith("{");
+
+      // 🆕 403 출처 구분
+      if (res.status === 403) {
+        if (!isJSON) {
+          // HTML 응답 → Cloudflare가 차단 (Bot Fight Mode / WAF)
+          if (attempt < retries) {
+            console.log(`[callAPI] Cloudflare 403 감지, ${2 ** attempt}초 후 재시도 (${attempt + 1}/${retries})`);
+            await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt)));
+            continue;
+          }
+          throw new Error("CLOUDFLARE_BLOCK: Cloudflare 보안 정책에 의해 요청이 차단되었습니다. 페이지를 새로고침한 후 다시 시도해 주세요.");
+        }
+        // JSON 응답 → Anthropic API 인증 에러 (재시도 무의미)
+        let parsed;
+        try { parsed = JSON.parse(b); } catch { parsed = {}; }
+        const debugInfo = parsed.debug ? ` [payload: ${parsed.debug.payload_size_kb}KB]` : "";
+        throw new Error(`AUTH_ERROR: ${parsed.error || "인증 오류"}${debugInfo}`);
+      }
+
+      // 429, 5xx → 재시도
+      const retryable = [429, 500, 502, 503, 529];
       if (retryable.includes(res.status) && attempt < retries) {
         const delay = Math.min(1500 * Math.pow(2, attempt), 10000);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
-      const b = await res.text().catch(() => "");
+
+      // 그 외 에러
       let errMsg;
-      try {
-        const p = JSON.parse(b);
-        // Worker가 보내는 errorType 활용
-        const et = p.errorType || "";
-        const detail = typeof p.error === "object" ? p.error?.message || JSON.stringify(p.error) : p.error || b.slice(0, 300);
-        errMsg = `${et}: ${detail}`;
-      } catch {
-        errMsg = `API ${res.status}: ${b.slice(0, 300)}`;
+      if (isJSON) {
+        try {
+          const p = JSON.parse(b);
+          const et = p.errorType || "";
+          const detail = typeof p.error === "object" ? p.error?.message || JSON.stringify(p.error) : p.error || b.slice(0, 300);
+          errMsg = `${et}: ${detail}`;
+        } catch { errMsg = `API ${res.status}: ${b.slice(0, 300)}`; }
+      } else {
+        errMsg = `API ${res.status}: 서버에서 예상치 못한 응답을 받았습니다.`;
       }
       throw new Error(errMsg);
     }
