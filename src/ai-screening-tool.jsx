@@ -129,22 +129,11 @@ async function callAPI(payload, retries = 2, signal = null) {
       const b = await res.text().catch(() => "");
       const isJSON = b.trim().startsWith("{");
 
-      // 🆕 403 출처 구분
-      if (res.status === 403) {
-        if (!isJSON) {
-          // HTML 응답 → Cloudflare가 차단 (Bot Fight Mode / WAF)
-          if (attempt < retries) {
-            console.log(`[callAPI] Cloudflare 403 감지, ${2 ** attempt}초 후 재시도 (${attempt + 1}/${retries})`);
-            await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt)));
-            continue;
-          }
-          throw new Error("CLOUDFLARE_BLOCK: Cloudflare 보안 정책에 의해 요청이 차단되었습니다. 페이지를 새로고침한 후 다시 시도해 주세요.");
-        }
-        // JSON 응답 → Anthropic API 인증 에러 (재시도 무의미)
-        let parsed;
-        try { parsed = JSON.parse(b); } catch { parsed = {}; }
-        const debugInfo = parsed.debug ? ` [payload: ${parsed.debug.payload_size_kb}KB]` : "";
-        throw new Error(`AUTH_ERROR: ${parsed.error || "인증 오류"}${debugInfo}`);
+      // 403: IP 기반 차단 → 재시도하면 다른 에지 서버를 타서 통과 가능
+      if (res.status === 403 && attempt < retries) {
+        console.log(`[callAPI] 403 감지, ${2 ** (attempt + 1)}초 후 재시도 (${attempt + 1}/${retries})`);
+        await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt)));
+        continue;
       }
 
       // 429, 5xx → 재시도
@@ -458,7 +447,7 @@ export default function AIScreeningTool() {
     setLoading(true); setError(""); setStep(3); startTimer(); setMergedPrev(false);
     partialResultsRef.current = []; // 🆕 부분 결과 초기화
 
-    const MAX_SIZE = 30 * 1024 * 1024, CONCURRENCY = 3;
+    const MAX_SIZE = 30 * 1024 * 1024, CONCURRENCY = 2;
     const criteriaCompact = c.criteria.map(cr => `[ID:${cr.id}] ${cr.name}: ${cr.description}`).join("\n");
     let done = 0;
 
