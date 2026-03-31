@@ -110,7 +110,7 @@ async function callAPI(payload, retries = 1, signal = null) {
       return callAPI(payload, retries - 1, signal);
     }
     const b = await res.text().catch(() => ""); 
-    try { const p = JSON.parse(b); throw new Error(`API ${res.status} [${p.stage||""}]: ${p.error||b.slice(0,400)}`); } 
+    try { const p = JSON.parse(b); const errMsg = typeof p.error === "object" ? p.error?.message || JSON.stringify(p.error) : p.error||b.slice(0,400); throw new Error(`API ${res.status} [${p.stage||""}]: ${errMsg}`); }
     catch (pe) { if (pe.message.startsWith("API ")) throw pe; throw new Error(`API ${res.status}: ${b.slice(0,400)}`); } 
   }
   const data = await res.json();
