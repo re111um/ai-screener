@@ -88,16 +88,17 @@ function sortByDateDesc(candidates) {
 }
 
 // ── API ─────────────────────────────────────────────────────
-async function callAPI(payload, retries = 1) {
+async function callAPI(payload, retries = 1, signal = null) {
   console.log(`[callAPI] 모델:${payload.model}`);
   let res;
   try { 
-    res = await fetch(API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); 
+    res = await fetch(API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }); 
   } catch (e) { 
+    if (e.name === "AbortError") throw e; // 취소는 재시도 없이 즉시 종료
     if (retries > 0) {
       console.log(`[callAPI] 네트워크 오류, 1초 후 재시도...`);
       await new Promise(r => setTimeout(r, 1000));
-      return callAPI(payload, retries - 1);
+      return callAPI(payload, retries - 1, signal);
     }
     throw new Error(`[네트워크] ${e.message}`); 
   }
@@ -106,7 +107,7 @@ async function callAPI(payload, retries = 1) {
     if ((res.status === 503 || res.status === 502) && retries > 0) {
       console.log(`[callAPI] ${res.status} 에러, 1초 후 재시도...`);
       await new Promise(r => setTimeout(r, 1000));
-      return callAPI(payload, retries - 1);
+      return callAPI(payload, retries - 1, signal);
     }
     const b = await res.text().catch(() => ""); 
     try { const p = JSON.parse(b); throw new Error(`API ${res.status} [${p.stage||""}]: ${p.error||b.slice(0,400)}`); } 
@@ -117,7 +118,7 @@ async function callAPI(payload, retries = 1) {
   if (!text.trim()) throw new Error(`빈 응답 (${data.stop_reason||"unknown"})`);
   return text;
 }
-async function callClaude(msgs, sys="", model=MODEL_SMART) { const p={model,max_tokens:4000,messages:msgs}; if(sys) p.system=sys; return Promise.race([callAPI(p),timeoutPromise(180000)]); }
+async function callClaude(msgs, sys="", model=MODEL_SMART, signal=null) { const p={model,max_tokens:4000,messages:msgs}; if(sys) p.system=sys; return Promise.race([callAPI(p,1,signal),timeoutPromise(180000)]); }
 async function callClaudeWithTools(msgs, tools, sys="", model=MODEL_SMART) { const p={model,max_tokens:4000,messages:msgs,tools}; if(sys) p.system=sys; return Promise.race([callAPI(p),timeoutPromise(180000)]); }
 
 // ── PDF ─────────────────────────────────────────────────────
@@ -282,7 +283,7 @@ export default function AIScreeningTool() {
   useEffect(()=>()=>stopTimer(),[stopTimer]);
 
   const fetchJobPosting=useCallback(async()=>{if(!jobUrl.trim())return;setFetchingUrl(true);setError("");try{const r=await callClaudeWithTools([{role:"user",content:`다음 URL의 채용 공고 내용을 검색해서 추출해 주세요: ${jobUrl}`}],[{type:"web_search_20250305",name:"web_search"}],SYS_URL_FETCH,MODEL_FAST);if(r?.trim()){setJobPosting(r.trim());setJobUrl("");}else setError("공고 내용을 가져오지 못했습니다.");}catch(e){setError(classifyError(e));}finally{setFetchingUrl(false);}},[jobUrl]);
-  const generateCriteria=useCallback(async()=>{if(!jobPosting.trim())return;setLoading(true);setError("");setLoadingMsg("채용 공고를 분석하고 있습니다...");startTimer();try{const raw=await callClaude([{role:"user",content:`다음 채용 공고를 분석하세요:\n\n${jobPosting}`}],SYS_CRITERIA,MODEL_SMART);const p=extractJSON(raw);if(!p?.criteria)throw new Error("평가 기준 추출 실패");setCriteria(p);setStep(1);}catch(e){setError("기준 생성 실패: "+classifyError(e));}finally{stopTimer();setLoading(false);}},[jobPosting,startTimer,stopTimer]);
+  const generateCriteria=useCallback(async()=>{if(!jobPosting.trim())return;const controller=new AbortController();abortRef.current=controller;setLoading(true);setError("");setLoadingMsg("채용 공고를 분석하고 있습니다...");startTimer();try{const raw=await callClaude([{role:"user",content:`다음 채용 공고를 분석하세요:\n\n${jobPosting}`}],SYS_CRITERIA,MODEL_SMART,controller.signal);const p=extractJSON(raw);if(!p?.criteria)throw new Error("평가 기준 추출 실패");setCriteria(p);setStep(1);}catch(e){if(e.name==="AbortError")return;setError("기준 생성 실패: "+classifyError(e));}finally{stopTimer();setLoading(false);abortRef.current=null;}},[jobPosting,startTimer,stopTimer]);
   const handleConfirmCriteria=useCallback(f=>{setConfirmedCriteria(f);autoSaveTemplate(f,jobPosting);setMergedPrev(false);setStep(2);},[jobPosting,autoSaveTemplate]);
   const handleFiles=e=>setFiles(prev=>[...prev,...Array.from(e.target.files).filter(f=>f.type==="application/pdf")]);
   const removeFile=idx=>setFiles(prev=>prev.filter((_,i)=>i!==idx));
@@ -326,7 +327,7 @@ export default function AIScreeningTool() {
         </div>
 
         <div style={{padding:"25px 40px",maxWidth:1100,margin:"0 auto"}}>
-          {loading&&<div style={{textAlign:"center",padding:"70px 20px"}}><div style={{width:56,height:56,border:"3px solid var(--surface2)",borderTopColor:"var(--accent)",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 22px"}}/><p style={{fontSize:18,fontWeight:500,fontFamily:F}}>{loadingMsg}</p><p style={{fontSize:15,color:"var(--text3)",marginTop:6}}>{elapsed}초</p><button onClick={()=>{stopTimer();setLoading(false);setStep(p=>p===3?2:p);setError("취소됨");}} style={{marginTop:20,padding:"10px 24px",borderRadius:10,border:"1px solid var(--border)",background:"transparent",color:"var(--text2)",fontSize:15,cursor:"pointer",fontFamily:F}}>취소</button></div>}
+          {loading&&<div style={{textAlign:"center",padding:"70px 20px"}}><div style={{width:56,height:56,border:"3px solid var(--surface2)",borderTopColor:"var(--accent)",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 22px"}}/><p style={{fontSize:18,fontWeight:500,fontFamily:F}}>{loadingMsg}</p><p style={{fontSize:15,color:"var(--text3)",marginTop:6}}>{elapsed}초</p><button onClick={()=>{abortRef.current?.abort();stopTimer();setLoading(false);setStep(p=>p===3?2:p);setError("취소됨");}} style={{marginTop:20,padding:"10px 24px",borderRadius:10,border:"1px solid var(--border)",background:"transparent",color:"var(--text2)",fontSize:15,cursor:"pointer",fontFamily:F}}>취소</button></div>}
 
           {error&&<div className="fade-in" style={{padding:"16px 20px",borderRadius:12,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",marginBottom:18,display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}><pre style={{fontSize:14,color:"#f87171",margin:0,lineHeight:1.5,whiteSpace:"pre-wrap",wordBreak:"break-word",fontFamily:F,flex:1}}>{error}</pre><button onClick={()=>setError("")} style={{background:"none",border:"none",color:"#f87171",cursor:"pointer",fontSize:18,padding:0,flexShrink:0}}>×</button></div>}
 
