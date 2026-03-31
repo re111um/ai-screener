@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/screen.js": {
+      "maxDuration": 60
+    }
+  }
+}
