@@ -82,19 +82,32 @@ async function handleApiRequest(request, env) {
   if (payload.system) body.system = payload.system;
   if (payload.tools?.length) body.tools = payload.tools;
 
-  try {
-    const apiRes = await fetch(ANTHROPIC_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify(body),
-    });
-    const responseText = await apiRes.text();
-    return new Response(responseText, { status: apiRes.status, headers: { "Content-Type": "application/json", ...cors } });
-  } catch (err) {
-    return new Response(JSON.stringify({ error: "Anthropic API 호출 실패: " + err.message, stage: "API 통신" }), { status: 502, headers: { "Content-Type": "application/json", ...cors } });
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const apiRes = await fetch(ANTHROPIC_API, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+      });
+      const responseText = await apiRes.text();
+
+      // 콜드 스타트로 인한 403/429 → 1.5초 후 재시도
+      if ((apiRes.status === 403 || apiRes.status === 429) && attempt < 2) {
+        await new Promise(r => setTimeout(r, 1500));
+        continue;
+      }
+
+      return new Response(responseText, { status: apiRes.status, headers: { "Content-Type": "application/json", ...cors } });
+    } catch (err) {
+      if (attempt < 2) {
+        await new Promise(r => setTimeout(r, 1500));
+        continue;
+      }
+      return new Response(JSON.stringify({ error: "Anthropic API 호출 실패: " + err.message, stage: "API 통신" }), { status: 502, headers: { "Content-Type": "application/json", ...cors } });
+    }
   }
 }
