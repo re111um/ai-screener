@@ -103,7 +103,7 @@ async function handleApiRequest(request, env) {
 
       return new Response(responseText, { status: apiRes.status, headers: { "Content-Type": "application/json", ...cors } });
     } catch (err) {
-      if (attempt < 2) {
+      if (attempt < 3) {  // ← 수정
         await new Promise(r => setTimeout(r, 1500));
         continue;
       }
