@@ -1,31 +1,29 @@
 /**
  * AI Screener — 통합 Worker 엔트리포인트
  * 
- * 1. /api/screen POST → Anthropic API 프록시
+ * 1. /api/screen POST → Anthropic API 프록시 (지수 백오프 재시도)
  * 2. /api/screen GET  → 상태 확인
  * 3. 그 외 → 정적 파일(프론트엔드) 서빙 via env.ASSETS
  */
 
 const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
+const MAX_RETRIES = 3;
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // /api/screen 경로만 API로 처리
     if (url.pathname === "/api/screen") {
       return handleApiRequest(request, env);
     }
 
-    // 정적 파일 서빙 (ASSETS 바인딩 사용)
     if (env.ASSETS) {
       return env.ASSETS.fetch(request);
     }
 
-    // ASSETS 바인딩이 없는 경우 안내 메시지
     return new Response(
-      JSON.stringify({ error: "ASSETS 바인딩이 설정되지 않았습니다. wrangler.jsonc의 assets.binding 설정을 확인하세요." }),
+      JSON.stringify({ error: "ASSETS 바인딩이 설정되지 않았습니다." }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   },
@@ -53,28 +51,49 @@ async function handleApiRequest(request, env) {
   }
 
   if (request.method !== "POST") {
-    return new Response(JSON.stringify({ error: "POST만 허용" }), { status: 405, headers: { "Content-Type": "application/json", ...cors } });
+    return new Response(JSON.stringify({ error: "POST만 허용" }), {
+      status: 405, headers: { "Content-Type": "application/json", ...cors }
+    });
   }
 
   const apiKey = env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: "ANTHROPIC_API_KEY가 설정되지 않았습니다.", stage: "환경변수" }), { status: 500, headers: { "Content-Type": "application/json", ...cors } });
+    return new Response(JSON.stringify({
+      error: "API 키가 설정되지 않았습니다. 관리자에게 문의하세요.",
+      errorType: "NO_API_KEY",
+      stage: "환경변수"
+    }), { status: 500, headers: { "Content-Type": "application/json", ...cors } });
   }
 
   let rawText;
   try { rawText = await request.text(); }
-  catch (e) { return new Response(JSON.stringify({ error: "요청 읽기 실패", stage: "요청" }), { status: 400, headers: { "Content-Type": "application/json", ...cors } }); }
+  catch (e) {
+    return new Response(JSON.stringify({
+      error: "요청 읽기 실패", errorType: "BAD_REQUEST", stage: "요청"
+    }), { status: 400, headers: { "Content-Type": "application/json", ...cors } });
+  }
 
   const size = new TextEncoder().encode(rawText).length;
   if (size > MAX_PAYLOAD_BYTES) {
-    return new Response(JSON.stringify({ error: `페이로드 초과 (${(size / 1024 / 1024).toFixed(1)}MB)`, stage: "크기" }), { status: 413, headers: { "Content-Type": "application/json", ...cors } });
+    return new Response(JSON.stringify({
+      error: `파일이 너무 큽니다 (${(size / 1024 / 1024).toFixed(1)}MB). 10MB 이하로 줄여주세요.`,
+      errorType: "PAYLOAD_TOO_LARGE",
+      stage: "크기"
+    }), { status: 413, headers: { "Content-Type": "application/json", ...cors } });
   }
 
   let payload;
   try { payload = JSON.parse(rawText); }
-  catch { return new Response(JSON.stringify({ error: "잘못된 JSON", stage: "파싱" }), { status: 400, headers: { "Content-Type": "application/json", ...cors } }); }
+  catch {
+    return new Response(JSON.stringify({
+      error: "잘못된 요청 형식", errorType: "INVALID_JSON", stage: "파싱"
+    }), { status: 400, headers: { "Content-Type": "application/json", ...cors } });
+  }
+
   if (!payload?.messages?.length) {
-    return new Response(JSON.stringify({ error: "messages 필요", stage: "검증" }), { status: 400, headers: { "Content-Type": "application/json", ...cors } });
+    return new Response(JSON.stringify({
+      error: "messages 필요", errorType: "MISSING_MESSAGES", stage: "검증"
+    }), { status: 400, headers: { "Content-Type": "application/json", ...cors } });
   }
 
   const model = payload.model || "claude-sonnet-4-6";
@@ -82,7 +101,8 @@ async function handleApiRequest(request, env) {
   if (payload.system) body.system = payload.system;
   if (payload.tools?.length) body.tools = payload.tools;
 
- for (let attempt = 1; attempt <= 3; attempt++) {
+  // ── 지수 백오프 재시도 ──
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const apiRes = await fetch(ANTHROPIC_API, {
         method: "POST",
@@ -93,21 +113,56 @@ async function handleApiRequest(request, env) {
         },
         body: JSON.stringify(body),
       });
+
       const responseText = await apiRes.text();
 
-      // 콜드 스타트로 인한 403/429 → 1.5초 후 재시도
-      if ((apiRes.status === 403 || apiRes.status === 429) && attempt < 3) {
-        await new Promise(r => setTimeout(r, 1500));
+      // 재시도 가능한 에러: 403, 429, 500, 502, 503, 529
+      const retryable = [403, 429, 500, 502, 503, 529];
+      if (retryable.includes(apiRes.status) && attempt < MAX_RETRIES) {
+        // 429는 Retry-After 헤더 존재 시 해당 시간만큼 대기
+        const retryAfter = apiRes.headers.get("retry-after");
+        const delay = retryAfter
+          ? Math.min(parseInt(retryAfter, 10) * 1000, 30000)
+          : Math.min(1000 * Math.pow(2, attempt - 1), 10000); // 1s, 2s, 4s...
+        await new Promise(r => setTimeout(r, delay));
         continue;
       }
 
-      return new Response(responseText, { status: apiRes.status, headers: { "Content-Type": "application/json", ...cors } });
+      // 최종 응답에 errorType 추가 (프론트엔드가 분류할 수 있도록)
+      if (!apiRes.ok) {
+        let parsed;
+        try { parsed = JSON.parse(responseText); } catch { parsed = null; }
+
+        const errorType =
+          apiRes.status === 401 || apiRes.status === 403 ? "AUTH_ERROR" :
+          apiRes.status === 429 ? "RATE_LIMIT" :
+          apiRes.status === 413 ? "PAYLOAD_TOO_LARGE" :
+          apiRes.status >= 500 ? "SERVER_ERROR" : "UNKNOWN";
+
+        return new Response(JSON.stringify({
+          error: parsed?.error?.message || responseText.slice(0, 300),
+          errorType,
+          status: apiRes.status,
+          stage: "Anthropic API",
+        }), { status: apiRes.status, headers: { "Content-Type": "application/json", ...cors } });
+      }
+
+      return new Response(responseText, {
+        status: apiRes.status,
+        headers: { "Content-Type": "application/json", ...cors }
+      });
+
     } catch (err) {
-      if (attempt < 3) {  // ← 수정
-        await new Promise(r => setTimeout(r, 1500));
+      if (attempt < MAX_RETRIES) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+        await new Promise(r => setTimeout(r, delay));
         continue;
       }
-      return new Response(JSON.stringify({ error: "Anthropic API 호출 실패: " + err.message, stage: "API 통신" }), { status: 502, headers: { "Content-Type": "application/json", ...cors } });
+      return new Response(JSON.stringify({
+        error: "서버 연결에 실패했습니다: " + err.message,
+        errorType: "NETWORK_ERROR",
+        stage: "API 통신"
+      }), { status: 502, headers: { "Content-Type": "application/json", ...cors } });
     }
   }
 }
