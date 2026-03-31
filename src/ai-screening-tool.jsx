@@ -291,19 +291,22 @@ export default function AIScreeningTool() {
   // ── 스크리닝 ──
   const screenResumes=useCallback(async()=>{
     const c=confirmedCriteria;if(!files.length||!c)return;
+    const controller=new AbortController();abortRef.current=controller;
     setLoading(true);setError("");setStep(3);startTimer();setMergedPrev(false);
     const MAX_SIZE=30*1024*1024,CONCURRENCY=3;const criteriaCompact=c.criteria.map(cr=>`[ID:${cr.id}] ${cr.name}: ${cr.description}`).join("\n");let done=0;
     const processOne=async file=>{
       try{if(file.size>MAX_SIZE)throw new Error(`크기 초과`);let content,text=null;try{text=await extractTextFromPDF(file);}catch(pe){throw new Error(`PDF 추출 실패: ${pe.message}`);}
         if(text){content=[{type:"text",text:`[이력서 텍스트 시작]\n${text.slice(0,12000)}\n[이력서 텍스트 끝]\n\n직무: ${c.job_title}\n\n평가 기준:\n${criteriaCompact}\n\n위 기준에 따라 이 이력서를 심사하세요.`}];}
         else{if(file.size>5*1024*1024)throw new Error(`이미지 PDF는 5MB 이하만 지원`);const b64=await fileToBase64(file);content=[{type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}},{type:"text",text:`이미지 기반 PDF를 읽어 분석하세요.\n\n직무: ${c.job_title}\n\n평가 기준:\n${criteriaCompact}\n\n위 기준에 따라 이 이력서를 심사하세요.`}];}
-        const res=await Promise.race([callAPI({model:MODEL_FAST,max_tokens:2000,system:SYS_SCREENING,messages:[{role:"user",content}]}),timeoutPromise(120000)]);const parsed=extractJSON(res);if(!parsed?.candidate_name)throw new Error("AI 응답 파싱 실패");
+        const res=await Promise.race([callAPI({model:MODEL_FAST,max_tokens:2000,system:SYS_SCREENING,messages:[{role:"user",content}]},1,controller.signal),timeoutPromise(120000)]);
+        const parsed=extractJSON(res);if(!parsed?.candidate_name)throw new Error("AI 응답 파싱 실패");
         parsed._fileName=file.name;parsed._screenedAt=todayStr();done++;setLoadingMsg(`이력서 분석 중 (${done}/${files.length} 완료)`);return parsed;
-      }catch(e){done++;setLoadingMsg(`이력서 분석 중 (${done}/${files.length} 완료)`);return{candidate_name:file.name.replace(/\.pdf$/i,""),_fileName:file.name,_screenedAt:todayStr(),summary:"분석 실패",total_experience:"확인 불가",relevant_experience:"확인 불가",evaluations:c.criteria.map(cr=>({criteria_id:cr.id,status:"판단 불가",reason:"분석 오류"})),recommendation:"FAIL",strength:"-",weakness:classifyError(e),_error:true};}
+      }catch(e){if(e.name==="AbortError")return null; // 취소 시 해당 파일 건너뜀
+      done++;setLoadingMsg(`이력서 분석 중 (${done}/${files.length} 완료)`);return{candidate_name:file.name.replace(/\.pdf$/i,""),_fileName:file.name,_screenedAt:todayStr(),summary:"분석 실패",total_experience:"확인 불가",relevant_experience:"확인 불가",evaluations:c.criteria.map(cr=>({criteria_id:cr.id,status:"판단 불가",reason:"분석 오류"})),recommendation:"FAIL",strength:"-",weakness:classifyError(e),_error:true};}
     };
-    try{setLoadingMsg(`이력서 분석 중 (0/${files.length} 완료)`);const all=await parallelMap(files,processOne,CONCURRENCY);setResults(sortByDateDesc(all));
+    try{setLoadingMsg(`이력서 분석 중 (0/${files.length} 완료)`);const all=await parallelMap(files,processOne,CONCURRENCY);const valid=all.filter(r=>r!==null);if(!valid.length)return;setResults(sortByDateDesc(valid));
       const saved=saveScreeningResults(c.job_title,c.criteria,all);if(!saved)setError("⚠️ 저장 공간 부족. 사이드바에서 오래된 히스토리를 삭제해주세요.");
-    }catch(e){setError("스크리닝 오류: "+classifyError(e));}finally{stopTimer();setLoading(false);}
+    }catch(e){setError("스크리닝 오류: "+classifyError(e));}finally{stopTimer();setLoading(false);abortRef.current=null;}
   },[files,confirmedCriteria,startTimer,stopTimer,saveScreeningResults]);
 
   const resetAll=()=>{setStep(0);setCriteria(null);setConfirmedCriteria(null);setFiles([]);setResults([]);setError("");setJobPosting("");setJobUrl("");setMergedPrev(false);};
